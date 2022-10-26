@@ -45,6 +45,7 @@ PG_COLLECTOR_TARGETS = {
     "pg_index": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_index;",
     "pg_attribute": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_attribute;",
     "pg_stat_user_tables": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_user_tables;",
+    "pg_trigger": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_trigger t, pg_constraint c WHERE t.tgconstraint = c.oid;",
 }
 
 

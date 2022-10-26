@@ -143,6 +143,9 @@ class OperatingUnit(Enum):
     TupleARInsertTriggers = 47
     TupleARUpdateTriggers = 48
     TupleARDeleteTriggers = 49
+    InsertUpdateFKTriggerEnforce = 50
+    AfterTriggerEndQuery = 51
+
 
 
 class Targets(Enum):
@@ -228,6 +231,13 @@ EXECUTION_FEATURES_MAP = {
     "TupleARInsertTriggers_num_triggers": "counter0",
     "TupleARUpdateTriggers_num_triggers": "counter0",
     "TupleARDeleteTriggers_num_triggers": "counter0",
+
+    "InsertUpdateFKTriggerEnforce_early_bail": "counter0",
+    "InsertUpdateFKTriggerEnforce_prepare_plan": "counter1",
+    "InsertUpdateFKTriggerEnforce_opt_generic": "counter2",
+    "InsertUpdateFKTriggerEnforce_opt_custom": "counter3",
+
+    "AfterTriggerEndQuery_num_invoke": "counter0",
 }
 
 

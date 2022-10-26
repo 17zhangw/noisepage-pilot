@@ -17,7 +17,6 @@ from behavior import BENCHDB_TO_TABLES
 from behavior.model_workload.utils import keyspace_metadata_read
 from behavior.model_workload.utils.keyspace_feature import construct_keyspaces, construct_query_states
 from behavior.utils.process_pg_state_csvs import process_time_pg_class
-from sklearn.mixture import BayesianGaussianMixture
 
 logger = logging.getLogger("exec_feature_synthesis")
 
@@ -99,6 +98,7 @@ WHERE s.total_tuples_touched > 0 AND s.num_queries > 0;
 CONCURRENCY_COLUMNS = [
     "window_bucket",
     "target",
+    "optype",
     "num_queries",
     "total_blks_hit",
     "total_blks_miss",
@@ -116,6 +116,7 @@ CONCURRENCY_QUERY = """
 SELECT
     s.window_bucket,
     s.target,
+    s.optype,
     s.num_queries,
     s.total_blks_hit,
     s.total_blks_miss,
@@ -125,6 +126,7 @@ SELECT
     f.relpages FROM
 (SELECT
     etarget as target,
+    optype,
     MIN(unix_timestamp) as start_timestamp,
     COUNT(DISTINCT statement_timestamp) as num_queries,
     SUM(blk_hit) as total_blks_hit,
@@ -134,7 +136,7 @@ SELECT
     width_bucket(query_order, array[{values}]) as window_bucket
 FROM {work_prefix}_mw_queries, LATERAL unnest(string_to_array(target, ',')) etarget
 WHERE plan_node_id = -1
-GROUP BY etarget, window_bucket) s,
+GROUP BY etarget, optype, window_bucket) s,
 
 LATERAL (
     SELECT * FROM {work_prefix}_mw_tables
@@ -282,12 +284,6 @@ def __gen_data_page_features(input_dir, engine, connection, work_prefix, wa, buc
             callback = save_bucket_keys_to_output(output_dir)
             tbls = [t for t in tables if not (Path(output_dir) / f"{t}.feather").exists()]
             construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=False, gen_op=True, callback_fn=callback)
-
-            # Generate keyspaces that encompss all OPTYPEs.
-            output_dir = Path(input_dir) / f"data_page_{slice_fragment}/holistic_keys"
-            callback = save_bucket_keys_to_output(output_dir)
-            tbls = [t for t in tables if not (Path(output_dir) / f"{t}.feather").exists()]
-            construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=False, gen_op=False, callback_fn=callback)
             open(f"{input_dir}/data_page_{slice_fragment}/keys/done", "w").close()
 
         # Truncate off the first value; this is because we want queries that span [t=0, t=1] to be assigned window 0.
@@ -364,20 +360,12 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
                 qos = [str(i) for i in qos_range]
 
                 # Get the keyspace affected.
-                output_dir = Path(input_dir) / f"concurrency/step{s}_keys"
+                output_dir = Path(input_dir) / f"concurrency/step{s}/keys"
                 callback = save_bucket_keys_to_output(output_dir)
                 tbls = [t for t in wa.table_attr_map.keys() if not (Path(output_dir) / f"{t}.feather").exists()]
                 window_index_map = {t:qos for t in tbls}
                 if len(tbls) > 0:
                     construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=False, gen_op=True, callback_fn=callback)
-
-                # Generate keyspaces that encompss all OPTYPEs.
-                output_dir = Path(input_dir) / f"concurrency/step{s}_holistic_keys"
-                callback = save_bucket_keys_to_output(output_dir)
-                tbls = [t for t in wa.table_attr_map.keys() if not (Path(output_dir) / f"{t}.feather").exists()]
-                window_index_map = {t:qos for t in tbls}
-                if len(tbls) > 0:
-                    construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=False, gen_op=False, callback_fn=callback)
 
                 # once again, we truncate off the first value so we can get a "window 0" (since all values < first element is window 0).
                 # in this case, we just strip off our dummy 0 that was added to mutate endpoints into corresponding start points.
@@ -387,7 +375,7 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
                 df = pd.DataFrame([r for r in result], columns=CONCURRENCY_COLUMNS)
                 df["mpi"] = mpi
                 df["step"] = s
-                df.to_feather(f"{output_dir}/data.feather")
+                df.to_feather(f"{input_dir}/concurrency/step{s}/data.feather")
                 del df
             raise Rollback(tx)
 
@@ -416,60 +404,10 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
     assert window_aggs.index.shape[0] == (max_window_index + 1) * (max_elapsed_slice + 1)
     frame_tuples = []
 
-    def compute(values, elapsed_slice, window_index, step):
-        mixture = BayesianGaussianMixture(
-            weight_concentration_prior_type="dirichlet_process",
-            weight_concentration_prior=1,
-            n_components=4,
-            reg_covar=1e-6,
-            init_params="random",
-            max_iter=1000,
-            mean_precision_prior=None,
-            mean_prior=None,
-            covariance_type="diag",
-            n_init=1,
-        )
-
-        hist = []
-        total = 0
-        for i in range(0, offcpu_logwidth):
-            if values[i] > 0:
-                hist.append(np.full(values[i], i+1))
-                total += values[i]
-
-        if total <= 4:
-            # We require at least 4 since we have 4 components.
-            return
-
-        if len(hist) == 0:
-            return
-
-        if len(hist) == 1:
-            # This is a spike...
-            target = hist[0][0]
-            means = [target, 0.0, 0.0, 0.0]
-            weights = [1.0, 0.0, 0.0, 0.0]
-            covars = [0.0, 0.0, 0.0, 0.0]
-        else:
-            mixture.fit(np.concatenate(hist).reshape(-1, 1))
-            means = mixture.means_.flatten().tolist()
-            covars = mixture.covariances_.flatten().tolist()
-            weights = mixture.weights_.flatten().tolist()
-
-        frame_tuples.append({
-            "mpi": mpi,
-            "step": step,
-            "window_index": window_index,
-            "elapsed_slice": elapsed_slice,
-            "means": means,
-            "covars": covars,
-            "weights": weights,
-            })
-
     # Step the windows in this sequence.
     for s in step:
         logger.info("Computing gaussian windows with step function: %s", s)
-        if (Path(input_dir) / f"concurrency/frame_step{s}.feather").exists():
+        if (Path(input_dir) / f"concurrency/step{s}/frame.feather").exists():
             continue
 
         with tqdm(total=(max_elapsed_slice + 1) * (max_window_index + 1)) as t:
@@ -478,12 +416,22 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
                 l = [l for l in range(s - 1, max_window_index + 1, s)]
                 for idx in l:
                     sf = window_aggs[(sl, idx-s+1):(sl, idx)]
-                    values = sf.sum()[0:offcpu_logwidth].values.astype(int)
-                    compute(values, sl, window_index, s)
+                    values = sf.sum()[0:offcpu_logwidth].values.astype(float)
+                    total = values.sum()
+                    if total != 0:
+                        values /= total
+                        frame_tuples.append({
+                            "mpi": mpi,
+                            "step": s,
+                            "window_index": window_index,
+                            "elapsed_slice": sl,
+                            "elapsed_slice_queries": total,
+                            "targets": values,
+                        })
                     window_index += 1
                     t.update(1)
 
-        pd.DataFrame(frame_tuples).to_feather(f"{input_dir}/concurrency/frame_step{s}.feather")
+        pd.DataFrame(frame_tuples).to_feather(f"{input_dir}/concurrency/step{s}/frame.feather")
         frame_tuples = []
 
     open(f"{input_dir}/concurrency/done", "w").close()

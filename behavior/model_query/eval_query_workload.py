@@ -34,8 +34,7 @@ from behavior.utils.process_pg_state_csvs import (
     process_time_pg_class,
     build_time_index_metadata
 )
-from behavior.model_workload.model import WorkloadModel, MODEL_WORKLOAD_TABLE_STATS_TARGETS, MODEL_WORKLOAD_TARGETS, NORM_RELATIVE_OPS
-from behavior.model_workload.utils import compute_frames as compute_frames_change
+import behavior.model_workload.models as model_workload_models
 import torch
 
 logger = logging.getLogger(__name__)
@@ -43,25 +42,6 @@ logger = logging.getLogger(__name__)
 ##################################################################################
 # Logic related to setting up the state.
 ##################################################################################
-
-def compute_ff_changes(dir_data, tables):
-    ddl = pd.read_csv(f"{dir_data}/pg_qss_ddl.csv")
-    ddl = ddl[ddl.command == "AlterTableOptions"]
-    ff_tbl_change_map = {t: [] for t in tables}
-    for tbl in tables:
-        query_str = ddl["query"].str
-        slots = query_str.contains(tbl) & query_str.contains("fillfactor")
-        tbl_changes = ddl[slots]
-        for q in tbl_changes.itertuples():
-            root = pglast.Node(pglast.parse_sql(q.query))
-            for node in root.traverse():
-                if isinstance(node, pglast.node.Node):
-                    if isinstance(node.ast_node, pglast.ast.DefElem):
-                        if node.ast_node.defname == "fillfactor":
-                            ff = node.ast_node.arg.val
-                            ff_tbl_change_map[tbl].append((q.statement_timestamp, ff))
-    return ff_tbl_change_map
-
 
 def compute_table_oids(conn):
     result = conn.execute("SELECT relname, oid from pg_class")
@@ -157,15 +137,6 @@ def compute_trigger_map(conn):
             trigger["attnames"] = attnames
 
     return triggers
-
-
-def load_models(path):
-    model_dict = {}
-    for model_path in path.rglob('*.pkl'):
-        with open(model_path, "rb") as model_file:
-            model = pickle.load(model_file)
-        model_dict[model.ou_name] = model
-    return model_dict
 
 ##################################################################################
 # Get query OUs from postgres and perform feature augmentation
@@ -999,50 +970,115 @@ def evaluate_query_plans(base_models, queries, scratch_it, output_path, eval_bat
 # Control
 ##################################################################################
 
-def main(psycopg2_conn, session_sql, compute_frames, use_workload_table_estimates, eval_batch_size, dir_models, dir_workload_model, dir_data, dir_evals_output, dir_scratch):
+def compute_ddl_changes(dir_data, tables):
+    ddl = pd.read_csv(f"{dir_data}/pg_qss_ddl.csv")
+    ddl = ddl[ddl.command == "AlterTableOptions"]
+    ff_tbl_change_map = {t: [] for t in tables}
+    for tbl in tables:
+        query_str = ddl["query"].str
+        slots = query_str.contains(tbl) & query_str.contains("fillfactor")
+        tbl_changes = ddl[slots]
+        for q in tbl_changes.itertuples():
+            root = pglast.Node(pglast.parse_sql(q.query))
+            for node in root.traverse():
+                if isinstance(node, pglast.node.Node):
+                    if isinstance(node.ast_node, pglast.ast.DefElem):
+                        if node.ast_node.defname == "fillfactor":
+                            ff = node.ast_node.arg.val
+                            ff_tbl_change_map[tbl].append((q.statement_timestamp, ff))
+    return ff_tbl_change_map
+
+
+def load_ou_models(path):
+    model_dict = {}
+    for model_path in path.rglob('*.pkl'):
+        with open(model_path, "rb") as model_file:
+            model = pickle.load(model_file)
+        model_dict[model.ou_name] = model
+    return model_dict
+
+
+def load_model(path, name):
+    if path is None:
+        return None
+
+    model_cls = getattr(model_workload_models, name)
+    model_dict = torch.load(path)
+
+    args = model_dict["model_args"]
+    num_outputs = model_dict["num_outputs"]
+    model = model_cls(args, num_outputs)
+    model.load_state_dict(model_dict["best_model"])
+    return model
+
+
+def main(workload_conn, target_conn, workload_analysis_prefix,
+         input_dir, session_sql, ou_models_path,
+         table_feature_model_path, buffer_page_model_path,
+         buffer_access_model_path, concurrency_model_path,
+         table_feature_granularity_queries,
+         buffer_access_granularity_queries,
+         concurrency_granularity_sec,
+         histogram_width,
+         output_dir):
+
+    logger.info("Beginning eval_query_workload evaluation of %s", input_dir)
+    assert False
+    target_conn.execute("SET qss_capture_enabled = OFF")
+    if session_sql is not None and session_sql.exists():
+        with open(session_sql, "r") as f:
+            for line in f:
+                target_conn.execute(line)
+
     # Load the models
-    base_models = load_models(dir_models)
-    workload_model = WorkloadModel()
-    workload_model.load(dir_workload_model)
+    ou_models = load_ou_models(ou_models_path)
+    table_feature_model = load_model(table_feature_model_path, "TableFeatureModel")
+    buffer_page_model = load_model(buffer_page_model_path, "BufferPageModel")
+    buffer_access_model = load_model(buffer_access_model, "BufferAccessModel")
+    concurrency_model = load_model(concurrency_model, "ConcurrencyModel")
 
-    # Scratch space is used to try and reduce debugging overhead.
-    scratch = dir_scratch / "eval_query_workload_scratch"
-    scratch.mkdir(parents=True, exist_ok=True)
+    # Get the query order ranges.
+    with workload_conn.transaction():
+        r = [r for r in workload_conn.execute(f"SELECT min(query_order), max(query_order) FROM {workload_analysis_prefix}_mw_queries_args")][0]
+        min_qo, max_qo = r[0], r[1]
 
-    table_attr_map, _, _, _, _, _ = keyspace_metadata_read(f"{dir_data}/analysis")
+    wa = keyspace_metadata_read(input_dir)[0]
+    tables = wa.table_attr_map.keys()
 
-    with psycopg.connect(psycopg2_conn, autocommit=True) as conn:
-        conn.execute("SET qss_capture_enabled = OFF")
-        if session_sql.exists():
-            with open(session_sql, "r") as f:
-                for line in f:
-                    conn.execute(line)
+    def save_bucket_keys_to_output(output):
+        def save_df_return_none(tbl, df):
+            Path(output).mkdir(parents=True, exist_ok=True)
+            df["key_dist"] = [",".join(map(str, l)) for l in df.key_dist]
+            df.to_feather(f"{output}/{tbl}.feather")
+            return None
 
-        # Load all the relevant data.
-        tables = table_attr_map.keys()
-        ff_tbl_change_map = compute_ff_changes(dir_data, tables)
-        table_oid_map = compute_table_oids(conn)
-        index_table_map = compute_index_table_map(conn)
-        index_keyspace_map = compute_index_keyspace_map(conn)
-        trigger_map = compute_trigger_map(conn)
+        return save_df_return_none
 
-        # Generate query operating units.
-        generate_query_ous(conn, compute_frames, use_workload_table_estimates, dir_data, tables, workload_model, ff_tbl_change_map, index_table_map, index_keyspace_map, table_oid_map, trigger_map, scratch)
+    # Populate the buffer access keyspace.
+    if table_feature_granularity_queries != buffer_access_granularity_queries and not (Path(output_dir) / "scratch/buffer_access/done").exists():
+        query_orders = range(min_qo, max_qo, buffer_access_granularity_queries)
+        window_index_map = {t: [i for i in query_orders] for t in tables}
+        callback = save_bucket_keys_to_output(Path(output_dir) / "scratch/buffer_access")
+        construct_keyspaces(logger, workload_conn, workload_analysis_prefix, tables, wa.table_attr_map, window_index_map, histogram_width, gen_data=False, gen_op=True, callback_fn=callback)
+        open(f"{output_dir}/scratch/buffer_access/done", "w").close()
 
-        # Attach metadata to query OUs.
-        attach_metadata_ous(conn, scratch)
+    # Populate the table feature keyspace.
+    if not (Path(output_dir) / "scratch/table_feature/done").exists():
+        query_orders = range(min_qo, max_qo, table_feature_granularity_queries)
+        window_index_map = {t: [i for i in query_orders] for t in tables}
+        callback = save_bucket_keys_to_output(Path(output_dir) / "scratch/table_feature")
+        construct_keyspaces(logger, connection, work_prefix, tables, wa.table_attr_map, window_index_map, buckets, gen_data=True, gen_op=True, callback_fn=callback)
+        open(f"{output_dir}/scratch/table_feature/done", "w").close()
 
-        # Read the full list of queries from the disk.
-        def read(f):
-            return pd.read_feather(f, columns=["query_id", "query_order", "query_text", "txn", "target", "OP", "statement_timestamp", "elapsed_us"])
-        queries = pd.concat(map(read, glob.glob(f"{dir_data}/snippets/chunk_*/chunk.feather")))
-        queries.sort_values(by=["query_order"], ignore_index=True)
+    shared_buffers = [r for r in target_conn.execute("SHOW shared_buffers")][0][0]
+    ddl_changes = compute_ddl_changes(input_dir, tables)
 
-        base_output = dir_evals_output
-        base_output.mkdir(parents=True, exist_ok=True)
-        evaluate_query_plans(base_models, queries, scratch, base_output, eval_batch_size)
-        with open(f"{base_output}/ddl_changes.pickle", "wb") as f:
-            pickle.dump(ff_tbl_change_map, f)
+    qos_windows = set(range(min_qo, max_qo, table_feature_granularity_queries) + range(min_qo, max_qo, buffer_access_granularity_queries))
+    qos_windows = sorted(list(qos_windows))
+    current_qo = 0
+    while current_qo < qos_windows[-1]:
+        pass
+
 
 
 class EvalQueryWorkloadCLI(cli.Application):
@@ -1050,73 +1086,121 @@ class EvalQueryWorkloadCLI(cli.Application):
         "--session-sql",
         Path,
         mandatory=False,
-        help="Path to a list of SQL statements that should be executed in the session prior to EXPLAIN.",
+        help="Path to list of SQL statements taht should be executed prior to EXPLAIN.",
     )
-    dir_data = cli.SwitchAttr(
-        "--dir-data",
+
+    input_dir = cli.SwitchAttr(
+        "--input-dir",
         Path,
         mandatory=True,
-        help="Folder containing raw evaluation CSVs.",
+        help="Folder that contains the input data.",
     )
-    dir_evals_output = cli.SwitchAttr(
-        "--dir-evals-output",
+
+    output_dir = cli.SwitchAttr(
+        "--output-dir",
         Path,
         mandatory=True,
         help="Folder to output evaluations to.",
     )
-    dir_scratch = cli.SwitchAttr(
-        "--dir-scratch",
-        Path,
-        mandatory=False,
-        help="Folder to use as scratch space.",
-        default = Path("/tmp/"),
-    )
-    dir_models = cli.SwitchAttr(
-        "--dir-base-models",
+
+    ou_models_path = cli.SwitchAttr(
+        "--ou-models",
         Path,
         mandatory=True,
-        help="Folder containing the base evaluation models.",
-    )
-    dir_workload_model = cli.SwitchAttr(
-        "--dir-workload-model",
-        Path,
-        mandatory=True,
-        help="Folder containing the workload model.",
-    )
-    psycopg2_conn = cli.SwitchAttr(
-        "--psycopg2-conn",
-        mandatory=True,
-        help="Psycopg2 connection string for connecting to a valid database.",
-    )
-    compute_frames = cli.Flag(
-        "--compute-frames",
-        default=False,
-        help="Whether we need to compute frames or can load from path.",
-    )
-    eval_batch_size = cli.SwitchAttr(
-        "--eval-batch-size",
-        int,
-        default=6,
-        help="Evaluation batch size to use.",
-    )
-    use_workload_table_estimate = cli.Flag(
-        "--use-workload-table-estimate",
-        default=False,
-        help="Whether to use workload model for table stats estimates.",
+        help="Folder that contains all the OU models.",
     )
 
+    table_feature_model_path = cli.SwitchAttr(
+        "--table-feature-model-path",
+        Path,
+        default=None,
+        help="Path to the table feature model that should be loaded.",
+    )
+
+    table_feature_granularity_queries = cli.SwitchAttr(
+        "--table-feature-granularity-queries",
+        int,
+        default=1000,
+        help="Granularity of window slices for table feature model in (# queries).",
+    )
+
+    buffer_page_model_path = cli.SwitchAttr(
+        "--buffer-page-model-path",
+        Path,
+        default=None,
+        help="Path to the buffer page model that should be loaded.",
+    )
+
+    buffer_access_model_path = cli.SwitchAttr(
+        "--buffer-access-model-path",
+        Path,
+        default=None,
+        help="Path to the buffer access model that should be loaded.",
+    )
+
+    buffer_access_granularity_queries = cli.SwitchAttr(
+        "--buffer-access-granularity-queries",
+        int,
+        default=1000,
+        help="Granularity of window slices for buffer access model in (# queries).",
+    )
+
+    concurrency_model_path = cli.SwitchAttr(
+        "--concurrency-model-path",
+        Path,
+        default=None,
+        help="Path to the concurrency model that should be loaded.",
+    )
+
+    concurrency_granularity_sec = cli.SwitchAttr(
+        "--concurrency-granularity-secs",
+        float,
+        default=1,
+        help="Granularity of concurrency window in seconds.",
+    )
+
+    workload_analysis_conn = cli.SwitchAttr(
+        "--workload-analysis-conn",
+        mandatory=True,
+        help="Connection string to workload analysis database.",
+    )
+
+    target_db_conn = cli.SwitchAttr(
+        "--target-db-conn",
+        mandatory=True,
+        help="COnnection string to target database.",
+    )
+
+    workload_analysis_prefix = cli.SwitchAttr(
+        "--workload-analysis-prefix",
+        mandatory=True,
+        help="Prefix that we should use for looking at the workload analysis database.",
+    )
+
+    histogram_width = cli.SwitchAttr(
+        "--histogram-width",
+        int,
+        default=10,
+        help="Number of buckets (or histogram width to accomodate into)."
+    )
 
     def main(self):
-        main(self.psycopg2_conn,
-             self.session_sql,
-             self.compute_frames,
-             self.use_workload_table_estimate,
-             self.eval_batch_size,
-             self.dir_models,
-             self.dir_workload_model,
-             self.dir_data,
-             self.dir_evals_output,
-             self.dir_scratch)
+        with psycopg.connect(self.workload_analysis_conn, autocommit=True) as workload_conn:
+            with psycopg.connect(self.target_db_conn, autocommit=True) as target_conn:
+                main(workload_conn, target_conn,
+                     self.workload_analysis_prefix,
+                     self.input_dir,
+                     self.session_sql,
+                     self.ou_models_path,
+                     self.table_feature_model_path,
+                     self.buffer_page_model_path,
+                     self.buffer_access_model_path,
+                     self.concurrency_model_path,
+                     self.table_feature_granularity_queries,
+                     self.buffer_access_granularity_queries,
+                     self.concurrency_granularity_sec,
+                     self.histogram_width,
+                     self.output_dir)
 
 
 if __name__ == "__main__":

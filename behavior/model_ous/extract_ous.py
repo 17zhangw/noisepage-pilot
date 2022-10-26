@@ -289,37 +289,7 @@ def diff_data(connection, work_prefix):
             connection.execute(f"CREATE UNLOGGED TABLE {work_prefix}_diff_{ou.name} PARTITION OF {work_prefix}_diff FOR VALUES IN ('{ou.name}') WITH (autovacuum_enabled = OFF)")
         connection.execute(f"CREATE UNLOGGED TABLE {work_prefix}_diff_default PARTITION OF {work_prefix}_diff DEFAULT WITH (autovacuum_enabled = OFF)")
 
-        diff_sql = f"INSERT INTO {work_prefix}_diff SELECT "
-        diff_sql += f"INSERT INTO {work_prefix}_diff " + construct_diff_sql(work_prefix, "raw_filter", QSS_STATS_COLUMNS, DIFFERENCE_COLUMNS, constrain_child=False)
-        for i in range(len(QSS_STATS_COLUMNS)):
-            k = QSS_STATS_COLUMNS[i][0]
-            if k not in DIFFERENCE_COLUMNS:
-                diff_sql += f"r1.{k}"
-            else:
-                diff_sql += f"greatest(r1.{k} - coalesce(r2.{k}, 0) - coalesce(r3.{k}, 0), 0)"
-
-            if i != len(QSS_STATS_COLUMNS) - 1:
-                diff_sql += ", "
-        diff_sql += f" FROM {work_prefix}_raw_filter r1 "
-        diff_sql += f"LEFT JOIN {work_prefix}_raw_filter r2 "
-        diff_sql += """
-            ON r1.query_id = r2.query_id AND
-               r1.db_id = r2.db_id AND
-               r1.statement_timestamp = r2.statement_timestamp AND
-               r1.pid = r2.pid AND
-               r1.left_child_node_id = r2.plan_node_id AND
-               r1.plan_node_id >= 0
-        """
-
-        diff_sql += f"LEFT JOIN {work_prefix}_raw_filter r3 "
-        diff_sql += """
-            ON r1.query_id = r3.query_id AND
-               r1.db_id = r3.db_id AND
-               r1.statement_timestamp = r3.statement_timestamp AND
-               r1.pid = r3.pid AND
-               r1.right_child_node_id = r3.plan_node_id AND
-               r1.plan_node_id >= 0
-        """
+        diff_sql = f"INSERT INTO {work_prefix}_diff " + construct_diff_sql(work_prefix, "raw_filter", QSS_STATS_COLUMNS, DIFFERENCE_COLUMNS, constrain_child=False)
         connection.execute(diff_sql)
 
 ##################################################################################

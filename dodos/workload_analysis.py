@@ -1,4 +1,5 @@
 import os
+import multiprocessing as mp
 from pathlib import Path
 
 from doit.action import CmdAction
@@ -191,7 +192,7 @@ def task_workload_exec_feature_synthesis():
                 "name": "slice_window",
                 "long": "slice_window",
                 "help": "Slice window to use.",
-                "default": "10000",
+                "default": "1000",
             },
             {
                 "name": "offcpu_logwidth",
@@ -221,103 +222,77 @@ def task_workload_exec_feature_synthesis():
     }
 
 
-def task_workload_train():
+def task_workload_build_exec_model():
     """
-    Workload Analysis: train workload models.
+    Workload Model: train execution feature models.
     """
+    def workload_build_exec_model(
+            model_name, input_dirs, output_dir, lr,
+            epochs, batch_size, cuda, train_size, hidden,
+            depth, sweep_dropout, add_nonnorm_features, num_iterations,
+            num_cpus, max_threads, hist_width, patience, ckpt_interval,
+            steps, window_slices):
+        assert model_name is not None
+        assert input_dirs is not None
+        assert output_dir is not None
+        assert lr is not None and epochs is not None and batch_size is not None and hidden is not None and depth is not None
 
-    def train_cmd(input_data, output_dir, separate, val_size, lr, epochs, batch_size, hidden_size, hist_length, cuda):
-        if not Path(output_dir).is_absolute():
-            # Make it a relative path to ARTIFACT_MODELS.
-            output_dir = ARTIFACT_MODELS / output_dir
+        for iw in input_dirs.split(","):
+            assert Path(iw).exists(), f"{iw} is not valid path."
 
-        train_args = (
-            f"--dir-input \"{input_data}\" "
-            f"--dir-output {output_dir} "
-            f"--separate {separate} "
-            f"--val-size {val_size} "
+        eval_args = (
+            f"--model-name {model_name} "
+            f"--lr {lr} "
             f"--epochs {epochs} "
             f"--batch-size {batch_size} "
-            f"--hidden-size {hidden_size} "
-            f"--hist-length {hist_length} "
+            f"--train-size {train_size} "
+            f"--hidden {hidden} "
+            f"--depth {depth} "
+            f"--input-dirs {input_dirs} "
+            f"--output-dir {output_dir} "
+            f"--num-iterations {num_iterations} "
+            f"--num-cpus {num_cpus} "
+            f"--max-threads {max_threads} "
+            f"--hist-width {hist_width} "
+            f"--patience {patience} "
+            f"--ckpt-interval {ckpt_interval} "
+            f"--steps {steps} "
+            f"--window-slices {window_slices} "
         )
 
-        if cuda is not None:
-            train_args += f"--cuda "
+        if cuda:
+            eval_args += "--cuda "
+        if sweep_dropout:
+            eval_args += "--sweep-dropout "
+        if add_nonnorm_features:
+            eval_args += "--add-nonnorm-features "
 
-        return f"python3 -m behavior workload_train {train_args}"
+        return f"python3 -m behavior workload_build_exec_model {eval_args}"
 
     return {
-        "actions": [f"mkdir -p {ARTIFACT_MODELS}", CmdAction(train_cmd, buffering=1)],
-        "targets": [ARTIFACT_MODELS],
-        "verbosity": VERBOSITY_DEFAULT,
+        "actions": [CmdAction(workload_build_exec_model, buffering=1),],
         "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
         "params": [
-            {
-                "name": "input_data",
-                "long": "input_data",
-                "help": "Path to all the input data that should be used, comma separated if multiple globs.",
-                "default": None,
-            },
-            {
-                "name": "output_dir",
-                "long": "output_dir",
-                "help": "Path to the output folder where the workload models should be written to.",
-                "default": None,
-            },
-            {
-                "name": "separate",
-                "long": "separate",
-                "help": "Whether to train separate models for each workload execution feature.",
-                "default": False,
-            },
-            {
-                "name": "val_size",
-                "long": "val_size",
-                "help": "Percentage of the validation dataset.",
-                "type": float,
-                "default": 0.2,
-            },
-            {
-                "name": "lr",
-                "long": "lr",
-                "help": "Learning rate for Adam optimizer.",
-                "type": float,
-                "default": 0.001,
-            },
-            {
-                "name": "epochs",
-                "long": "epochs",
-                "help": "Number of epochs to train the model.",
-                "type": int,
-                "default": 1000,
-            },
-            {
-                "name": "batch_size",
-                "long": "batch_size",
-                "help": "Batch size that should be used.",
-                "type": int,
-                "default": 1024,
-            },
-            {
-                "name": "hidden_size",
-                "long": "hidden_size",
-                "help": "Number of hidden units.",
-                "type": int,
-                "default": 256,
-            },
-            {
-                "name": "hist_length",
-                "long": "hist_length",
-                "help": "Length of histogram featurization.",
-                "type": int,
-                "default": 10,
-            },
-            {
-                "name": "cuda",
-                "long": "cuda",
-                "help": "Whether to use CUDA or not.",
-                "default": None,
-            },
+            { "name": "model_name", "long": "model_name", "help": "Model Name from models to create.", "default": None, },
+            { "name": "input_dirs", "long": "input_dirs", "help": "Path to multiple input directories.", "default": None, },
+            { "name": "output_dir", "long": "output_dir", "help": "Path to the containing output model directory.", "default": None, },
+            { "name": "lr", "long": "lr", "help": "Learning rate to use for training.", "default": None, },
+            { "name": "epochs", "long": "epochs", "help": "Epochs to use for training.", "default": None, },
+            { "name": "batch_size", "long": "batch_size", "help": "Batch size to use for training.", "default": None, },
+            { "name": "cuda", "long": "cuda", "help": "Whether to use CUDA or not.", "default": False, },
+            { "name": "train_size", "long": "train_size", "help": "Percentage of data to use for training.", "default": 0.8, },
+            { "name": "hidden", "long": "hidden", "help": "Number of hidden to units to use across the model.", "default": None, },
+            { "name": "depth", "long": "depth", "help": "Depth to use in the model.", "default": None, },
+            { "name": "sweep_dropout", "long": "sweep_dropout", "help": "Whether to sweep dropout.", "default": False, },
+            { "name": "add_nonnorm_features", "long": "add_nonnorm_features", "help": "Whether to add non normalization features>", "default": False, },
+            { "name": "num_iterations", "long": "num_iterations", "help": "Number of iterations.", "default": 1, },
+            { "name": "num_cpus", "long": "num_cpus", "help": "Number of CPUs.", "default": mp.cpu_count(), },
+            { "name": "max_threads", "long": "max_threads", "help": "Maximum number of threads.", "default": mp.cpu_count(), },
+            { "name": "hist_width", "long": "hist_width", "help": "Width of the histogram.", "default": 10, },
+            { "name": "patience", "long": "patience", "help": "Patience for early stopping.", "default": 400, },
+            { "name": "ckpt_interval", "long": "ckpt_interval", "help": "Interval for checkpointing.", "default": 100, },
+            { "name": "steps", "long": "steps", "help": "Steps for concurrency.", "default": "1", },
+            { "name": "window_slices", "long": "window_slices", "help": "Window slices for buffer pool model.", "default": "1000", },
         ],
     }
