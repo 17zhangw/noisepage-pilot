@@ -117,7 +117,7 @@ def task_workload_exec_feature_synthesis():
     """
     Workload Analysis: collect the input feature data for training exec feature model.
     """
-    def workload_exec_feature_synthesis(input_workload, workload_only, psycopg2_conn, work_prefix, buckets, slice_window, gen_exec_features, gen_data_page_features, gen_concurrency_features):
+    def workload_exec_feature_synthesis(input_workload, workload_only, psycopg2_conn, work_prefix, buckets, steps, slice_window, offcpu_logwidth, gen_exec_features, gen_data_page_features, gen_concurrency_features):
         assert input_workload is not None
         assert work_prefix is not None
 
@@ -129,7 +129,9 @@ def task_workload_exec_feature_synthesis():
             f"--workload-only {workload_only} "
             f"--work-prefix {work_prefix} "
             f"--buckets {buckets} "
+            f"--steps {steps} "
             f"--slice-window {slice_window} "
+            f"--offcpu-logwidth {offcpu_logwidth} "
         )
 
         if gen_exec_features is not None:
@@ -180,10 +182,22 @@ def task_workload_exec_feature_synthesis():
                 "default": 10,
             },
             {
+                "name": "steps",
+                "long": "steps",
+                "help": "Summarization steps for concurrency histograms.",
+                "default": "1",
+            },
+            {
                 "name": "slice_window",
                 "long": "slice_window",
                 "help": "Slice window to use.",
                 "default": "10000",
+            },
+            {
+                "name": "offcpu_logwidth",
+                "long": "offcpu_logwidth",
+                "help": "Off CPU Log-width time (# buckets in histogram).",
+                "default": 31,
             },
             {
                 "name": "gen_exec_features",

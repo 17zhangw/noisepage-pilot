@@ -51,6 +51,7 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
     benchbase_configs = []
     pg_configs = []
     post_execute = []
+    pre_execute = []
     for idx, run in enumerate(config["runs"]):
         # Copy and inject the XML file of BenchBase.
         benchbase_config_file = Path(benchmark_dir / f"benchbase_config_{idx}.xml")
@@ -80,6 +81,11 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
         else:
             post_execute.append(None)
 
+        if "pre_execute_sql" in run and run["pre_execute_sql"] is not None:
+            pre_execute.append(run["pre_execute_sql"])
+        else:
+            pre_execute.append(None)
+
     # Create the config.yaml file
     output = {
         "benchmark": config["benchmark"],
@@ -94,6 +100,7 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
         "enable_collector": config["enable_collector"],
         "taskset_postgres": config["taskset_postgres"],
         "taskset_benchbase": config["taskset_benchbase"],
+        "collector_interval": config["collector_interval"],
     }
 
     if "dump_db_path" in config and config["dump_db_path"] is not None:
@@ -104,6 +111,12 @@ def generate_workload(config, mode_dir, benchbase_path, postgresql_config_file):
         output_post_execute |= val is not None
     if output_post_execute:
         output["post_execute"] = post_execute
+
+    output_pre_execute = False
+    for val in pre_execute:
+        output_pre_execute |= val is not None
+    if output_pre_execute:
+        output["pre_execute"] = pre_execute
 
     if config["restore_db_path"] is not None:
         output["restore_db"] = True

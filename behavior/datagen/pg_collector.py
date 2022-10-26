@@ -130,7 +130,7 @@ def monitor_postgres_pid(pid):
     for probe in ["fork_backend", "reap_backend"]:
         probes.enable_probe(probe=probe, fn_name=probe)
 
-    return BPF(text=postgres_probe_c, usdt_contexts=[probes], cflags=['-DKBUILD_MODNAME="tscout"'])
+    return BPF(text=postgres_probe_c, usdt_contexts=[probes])
 
 def postmaster_event_cb(postgres_bpf, histograms, processes, collector_flags):
     def postmaster_event(cpu, data, size):
@@ -182,37 +182,37 @@ def collector(histograms, collector_flags, pid, socket_fd):
 
     markers = USDT(pid=pid)
     marker_probes = USDT(pid=pid)
-    for probe in ["qss_ExecutorStart", "qss_ExecutorEnd"]:
+    for probe in ["qss_ExecutorStart", "qss_ExecutorEnd", "qss_Block", "qss_Unblock"]:
         marker_probes.enable_probe(probe=probe, fn_name=probe)
 
-    cflags = ['-DKBUILD_MODNAME="collector"']
-    collector_bpf = BPF(text=markers_c, usdt_contexts=[marker_probes], cflags=cflags)
-    collector_bpf.attach_kprobe(event="finish_task_switch", fn_name="sched_switch")
+    collector_bpf = BPF(text=markers_c, usdt_contexts=[marker_probes])
+    collector_bpf.attach_kprobe(event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$", fn_name="sched_switch")
     collector_bpf.attach_kprobe(event="vfs_read", fn_name="trace_read_entry")
     collector_bpf.attach_kretprobe(event="vfs_read", fn_name="trace_read_return")
     collector_bpf.attach_kprobe(event="vfs_write", fn_name="trace_write_entry")
     collector_bpf.attach_kretprobe(event="vfs_write", fn_name="trace_write_return")
 
     window_count = 0
-    histogram = collector_bpf.get_table("dist")
+    hists = [(0, collector_bpf.get_table("dist0")), (1, collector_bpf.get_table("dist6")),  (2, collector_bpf.get_table("dist10")),]
     while collector_flags[pid]:
         try:
             # No perf event, so just sleep...
             if pid not in collector_pids:
-                hist = { "time": time.time_ns() / 1000, "window_index": window_count, "pid": pid, }
-                for i in range(1, 65):
-                    low = (1 << i) >> 1;
-                    high = (1 << i) - 1;
-                    if low == high:
-                        low -= 1
-                    key = f"{low}_{high}"
+                for sl, histogram in hists:
+                    hist = { "time": time.time_ns() / 1000, "elapsed_slice": sl, "window_index": window_count, "pid": pid, }
+                    for i in range(1, 32):
+                        low = (1 << i) >> 1;
+                        high = (1 << i) - 1;
+                        if low == high:
+                            low -= 1
+                        key = f"{low}_{high}"
 
-                    try:
-                        hist[key] = histogram[i].value
-                    except:
-                        hist[key] = 0
+                        try:
+                            hist[key] = histogram[i].value
+                        except:
+                            hist[key] = 0
 
-                histograms.append(hist)
+                    histograms.append(hist)
                 window_count += 1
 
             # Try and get second level histogram resolutions.

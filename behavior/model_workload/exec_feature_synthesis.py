@@ -299,10 +299,11 @@ def __gen_data_page_features(input_dir, engine, connection, work_prefix, wa, buc
         open(f"{input_dir}/data_page_{slice_fragment}/done", "w").close()
 
 
-def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, buckets):
+def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, buckets, concurrency_steps, offcpu_logwidth):
     if (Path(input_dir) / "concurrency/done").exists():
         return
 
+    step = [int(i) for i in concurrency_steps.split(",")]
     data = pd.read_csv(f"{input_dir}/histograms.csv")
     data = data[data.pid != data.iloc[0].pid]
     mpi = data.pid.nunique()
@@ -319,11 +320,10 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
     except Exception as e:
         logger.info("Exception encountered: %s", e)
 
-    step = [1, 2, 4, 8, 16]
     if not (Path(input_dir) / "concurrency/data_done").exists():
-	    # FIXME(TIME): In principle, this should be done per PID and stats accumulated per PID.
+        # FIXME(TIME): In principle, this should be done per PID and stats accumulated per PID.
         # But we are already aggregating over all PIDs anyways so I think this should be fine.
-        time_us = data[data.pid == data.iloc[0].pid][["window_index", "time"]]
+        time_us = data[(data.pid == data.iloc[0].pid) & (data.elapsed_slice == 0)][["window_index", "time"]]
         time_us["time"] = time_us.time / 1.0e6
         time_us.sort_values(by=["window_index"], inplace=True)
         time_us["query_order"] = np.nan
@@ -369,7 +369,15 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
                 tbls = [t for t in wa.table_attr_map.keys() if not (Path(output_dir) / f"{t}.feather").exists()]
                 window_index_map = {t:qos for t in tbls}
                 if len(tbls) > 0:
-                    construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=False, callback_fn=callback)
+                    construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=False, gen_op=True, callback_fn=callback)
+
+                # Generate keyspaces that encompss all OPTYPEs.
+                output_dir = Path(input_dir) / f"concurrency/step{s}_holistic_keys"
+                callback = save_bucket_keys_to_output(output_dir)
+                tbls = [t for t in wa.table_attr_map.keys() if not (Path(output_dir) / f"{t}.feather").exists()]
+                window_index_map = {t:qos for t in tbls}
+                if len(tbls) > 0:
+                    construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=False, gen_op=False, callback_fn=callback)
 
                 # once again, we truncate off the first value so we can get a "window 0" (since all values < first element is window 0).
                 # in this case, we just strip off our dummy 0 that was added to mutate endpoints into corresponding start points.
@@ -387,7 +395,7 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
 
     # Now we start generating the gaussian fits and curves.
     def convert(n):
-        if n in ["window_index", "pid", "time"]:
+        if n in ["window_index", "elapsed_slice", "pid", "time"]:
             return n
         elif n == "0_1":
             return "delay_1"
@@ -396,68 +404,92 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
 
     data.rename(convert, axis="columns", inplace=True)
     data.drop(columns=["time"], inplace=True)
-    for pid, df in data.groupby(by=["pid"]):
+    for key, df in data.groupby(by=["pid", "elapsed_slice"]):
         # Adjust so each "window" has its own data.
         df.sort_values(by=["window_index"], ascending=False)
-        ind = [f"delay_{i}" for i in range(1, 65)]
+        ind = [f"delay_{i}" for i in range(1, offcpu_logwidth + 1)]
         data.loc[df.index, ind] = df[ind] - df[ind].shift(fill_value=0)
 
-    window_aggs = data.drop(columns=["pid"]).groupby(by=["window_index"]).sum()
+    max_elapsed_slice = np.max(data.elapsed_slice)
+    max_window_index = np.max(data.window_index)
+    window_aggs = data.drop(columns=["pid"]).groupby(by=["elapsed_slice", "window_index"]).sum()
+    assert window_aggs.index.shape[0] == (max_window_index + 1) * (max_elapsed_slice + 1)
     frame_tuples = []
 
-    def compute(values, window_index, step):
+    def compute(values, elapsed_slice, window_index, step):
         mixture = BayesianGaussianMixture(
             weight_concentration_prior_type="dirichlet_process",
             weight_concentration_prior=1,
             n_components=4,
             reg_covar=1e-6,
             init_params="random",
-            max_iter=1500,
+            max_iter=1000,
             mean_precision_prior=None,
             mean_prior=None,
-            covariance_type="full",
+            covariance_type="diag",
             n_init=1,
         )
 
         hist = []
-        for i in range(0, 64):
+        total = 0
+        for i in range(0, offcpu_logwidth):
             if values[i] > 0:
                 hist.append(np.full(values[i], i+1))
+                total += values[i]
 
-        if len(hist) <= 4:
-            # This is when there is no delta.
+        if total <= 4:
+            # We require at least 4 since we have 4 components.
             return
 
-        mixture.fit(np.concatenate(hist).reshape(-1, 1))
+        if len(hist) == 0:
+            return
+
+        if len(hist) == 1:
+            # This is a spike...
+            target = hist[0][0]
+            means = [target, 0.0, 0.0, 0.0]
+            weights = [1.0, 0.0, 0.0, 0.0]
+            covars = [0.0, 0.0, 0.0, 0.0]
+        else:
+            mixture.fit(np.concatenate(hist).reshape(-1, 1))
+            means = mixture.means_.flatten().tolist()
+            covars = mixture.covariances_.flatten().tolist()
+            weights = mixture.weights_.flatten().tolist()
 
         frame_tuples.append({
             "mpi": mpi,
             "step": step,
             "window_index": window_index,
-            "means": mixture.means_.flatten().tolist(),
-            "covars": mixture.covariances_.flatten().tolist(),
-            "weights": mixture.weights_.flatten().tolist(),
+            "elapsed_slice": elapsed_slice,
+            "means": means,
+            "covars": covars,
+            "weights": weights,
             })
 
     # Step the windows in this sequence.
     for s in step:
+        logger.info("Computing gaussian windows with step function: %s", s)
         if (Path(input_dir) / f"concurrency/frame_step{s}.feather").exists():
             continue
 
-        logger.info("Computing gaussian windows with step function: %s", s)
-        window_index = 0
-        l = [l for l in range(s - 1, window_aggs.shape[0], s)]
-        for idx in tqdm(l):
-            values = window_aggs[idx-s+1:idx+1].sum()[0:64].values.astype(int)
-            compute(values, window_index, s)
-            window_index += 1
+        with tqdm(total=(max_elapsed_slice + 1) * (max_window_index + 1)) as t:
+            for sl in range(0, max_elapsed_slice + 1):
+                window_index = 0
+                l = [l for l in range(s - 1, max_window_index + 1, s)]
+                for idx in l:
+                    sf = window_aggs[(sl, idx-s+1):(sl, idx)]
+                    values = sf.sum()[0:offcpu_logwidth].values.astype(int)
+                    compute(values, sl, window_index, s)
+                    window_index += 1
+                    t.update(1)
+
         pd.DataFrame(frame_tuples).to_feather(f"{input_dir}/concurrency/frame_step{s}.feather")
         frame_tuples = []
 
     open(f"{input_dir}/concurrency/done", "w").close()
 
 
-def collect_inputs(input_dir, workload_only, psycopg2_conn, work_prefix, buckets, slice_window, gen_exec_features, gen_data_page_features, gen_concurrency_features):
+def collect_inputs(input_dir, workload_only, psycopg2_conn, work_prefix, buckets, concurrency_steps, slice_window, offcpu_logwidth, gen_exec_features, gen_data_page_features, gen_concurrency_features):
     wa = keyspace_metadata_read(input_dir)[0]
 
     engine = create_engine(psycopg2_conn)
@@ -470,7 +502,7 @@ def collect_inputs(input_dir, workload_only, psycopg2_conn, work_prefix, buckets
             __gen_data_page_features(input_dir, engine, connection, work_prefix, wa, buckets, slice_window)
 
         if gen_concurrency_features:
-            __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, buckets)
+            __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, buckets, concurrency_steps, offcpu_logwidth)
 
 
 class ExecFeatureSynthesisCLI(cli.Application):
@@ -505,6 +537,20 @@ class ExecFeatureSynthesisCLI(cli.Application):
         int,
         default=10,
         help="Number of buckets to use for input data.",
+    )
+
+    concurrency_steps = cli.SwitchAttr(
+        "--steps",
+        str,
+        default="1",
+        help="Summarizations of the concurrency features.",
+    )
+
+    offcpu_logwidth = cli.SwitchAttr(
+        "--offcpu-logwidth",
+        int,
+        default=31,
+        help="Log Width of the off cpu elapsed us axis.",
     )
 
     slice_window = cli.SwitchAttr(
@@ -542,7 +588,9 @@ class ExecFeatureSynthesisCLI(cli.Application):
                            self.psycopg2_conn,
                            self.work_prefix,
                            self.buckets,
+                           self.concurrency_steps,
                            self.slice_window,
+                           self.offcpu_logwidth,
                            self.gen_exec_features,
                            self.gen_data_page_features,
                            self.gen_concurrency_features)

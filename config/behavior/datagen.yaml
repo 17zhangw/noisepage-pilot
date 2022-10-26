@@ -37,6 +37,8 @@ datagen:
     taskset_postgres: null
     # Whether we want to taskset benchbase. This provides the cpu-list argument.
     taskset_benchbase: null
+    # Interval of which to poll the benchbase database about catalog information.
+    collector_interval: 30
     # Default options that will (default) apply to all runs. Can be overriden.
     default_options:
       - qss_capture_enabled = ON
@@ -51,6 +53,7 @@ datagen:
         works.work.rate: unlimited
         works.work.time: 60
         post_execute_sql: null
+        pre_execute_sql: null
         # Specifying this requires continuous = False since that requires restarting the database.
         # If continuous = True, these options for subsequent runs are not honored.
         options: null

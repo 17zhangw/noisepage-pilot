@@ -279,13 +279,19 @@ for workload in "${workload_directory}"/*; do
             then
                 # Initialize collector. We currently don't have a means by which to check whether
                 # collector has successfully attached to the instance. As such, we (wait) 10 seconds.
-                doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=60 --collector_interval=30 --pid=$postmaster_pid
+                doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=60 --collector_interval=$collector_interval --pid=$postmaster_pid
             elif [ "$snapshot_metadata" == 'True' ];
             then
                 # Copy metadata into collector files.
                 cp "{benchmark_output}/pg_stats.csv.${i}" "${benchmark_output}/pg_stats.csv"
                 cp "{benchmark_output}/pg_class.csv.${i}" "${benchmark_output}/pg_class.csv"
                 cp "{benchmark_output}/pg_attribute.csv.${i}" "${benchmark_output}/pg_attribute.csv"
+            fi
+
+            if [ ! -z "$pre_execute" ];
+            then
+                preexecute_path=$(realpath "${pre_execute[$i]}")
+                ${psql} --dbname=benchbase -f "${preexecute_path}"
             fi
 
             # Execute the benchmark
