@@ -153,20 +153,15 @@ def main(
 
         it = 0
         while df_train is not None:
-            x_train = df_train[features]
-            y_train = df_train[targets].values
-            del df_train
-            gc.collect()
-
-            assert x_train.shape[1] != 0 and y_train.shape[1] != 0
-
             for model in models:
                 if model.support_incremental():
                     logger.info("Partially updating (%s, %s) chunk %s", ou_name, model.method, it)
-                    model.train(x_train, y_train)
-                    del x_train
-                    del y_train
+                    x_train = df_train[features]
+                    y_train = df_train[targets].values
+                    assert x_train.shape[1] != 0 and y_train.shape[1] != 0
+                    model.train(df_train[features], df_train[targets].values)
 
+            del df_train
             df_train = loader.get_next_data()
             it += 1
         del loader

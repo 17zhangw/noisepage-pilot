@@ -145,6 +145,11 @@ class OperatingUnit(Enum):
     TupleARDeleteTriggers = 49
     InsertUpdateFKTriggerEnforce = 50
     AfterTriggerEndQuery = 51
+    DestReceiverSPI = 52
+    InitIndexScan = 53
+    InitIndexOnlyScan = 54
+    InitLockRows = 55
+    ExecutorStart = 56
 
 
 
@@ -238,6 +243,18 @@ EXECUTION_FEATURES_MAP = {
     "InsertUpdateFKTriggerEnforce_opt_custom": "counter3",
 
     "AfterTriggerEndQuery_num_invoke": "counter0",
+
+    "DestReceiverSPI_num_output": "counter0",
+
+    "InitIndexScan_num_scan_keys": "counter0",
+    "InitIndexScan_num_runtime_keys": "counter1",
+    "InitIndexScan_num_orderby_keys": "counter2",
+    "InitIndexOnlyScan_num_scan_keys": "counter0",
+    "InitIndexOnlyScan_num_runtime_keys": "counter1",
+    "InitIndexOnlyScan_num_orderby_keys": "counter2",
+    "InitLockRows_num_marks": "counter0",
+    "ExecutorStart_num_marks": "counter0",
+    "ExecutorStart_num_subplans": "counter1",
 }
 
 
@@ -247,6 +264,9 @@ It is assumed that the key maps directly to the value.
 """
 DERIVED_FEATURES_MAP = {k: k for k in EXECUTION_FEATURES_MAP}
 DERIVED_FEATURES_MAP.update({"total_cost": "total_cost", "startup_cost": "startup_cost"})
+DERIVED_FEATURES_MAP.update({"IndexScan_scan_est_pages_needed": "IndexScan_scan_est_pages_needed"})
+DERIVED_FEATURES_MAP.update({"IndexOnlyScan_scan_est_pages_needed": "IndexOnlyScan_scan_est_pages_needed"})
+DERIVED_FEATURES_MAP.update({"SeqScan_scan_est_pages_needed": "SeqScan_scan_est_pages_needed"})
 
 for ou in OperatingUnit:
     # Generate per-OU switches for the KNOBs and the block stats.

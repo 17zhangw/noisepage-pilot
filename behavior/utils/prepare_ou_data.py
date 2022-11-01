@@ -243,7 +243,7 @@ class OUDataLoader():
             assert chunk.shape[0] <= initial
 
         chunk.reset_index(drop=True, inplace=True)
-        chunk = clean_input_data(chunk, self.train)
+        chunk = clean_input_data(chunk, self.train).copy()
         chunk["data_identifier"] = chunk.index
         return chunk
 
