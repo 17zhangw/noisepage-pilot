@@ -187,12 +187,17 @@ def build_window_indexes(connection, work_prefix, input_dir, tables, all_targets
             # to capture the *impact* of vacuum as opposed to vacuum itself. Otherwise, we'll probably need
             # a "backward"-work model where we feed the deltas in the prior window to predict elapsed time.
 
+            autovacuum_times = []
             substat = pg_stat_user_tables[pg_stat_user_tables.relname == tbl]
-            autovacuum_times = [v[0] for v in substat.groupby(by=["autovacuum_unix_timestamp"])]
+            if substat.shape[0] > 0:
+                # Get the times when autovacuum ran.
+                autovacuum_times = [v for v in substat.autovacuum_unix_timestamp.value_counts().index]
+
             if len(autovacuum_times) > 0:
                 wipe_frame = pd.DataFrame([{"time": autovac, "true_window_index": -1} for autovac in autovacuum_times])
                 sample = pd.concat([sample, wipe_frame], ignore_index=True)
                 sample.sort_values(by=["time"], ignore_index=True, inplace=True)
+
             sample["window_index"] = sample.index
 
             consider_tbls = [t for t in all_targets if tbl in t]
@@ -206,8 +211,15 @@ def build_window_indexes(connection, work_prefix, input_dir, tables, all_targets
             sql = f"SELECT window_index, time, b.query_order FROM {sql}, "
             sql += f"LATERAL (SELECT MIN(query_order) as query_order FROM {work_prefix}_mw_queries_args WHERE unix_timestamp > time AND {clause}) b ORDER BY window_index"
             c = connection.execute(sql)
-            sample["query_order"] = [r[2] for r in c]
-            assert sample.query_order.is_monotonic
+            tups = [(tup[0], tup[2]) for tup in c]
+
+            sample.set_index(keys=["window_index"], inplace=True)
+            sample.loc[[r[0] for r in tups], "query_order"] = [r[1] for r in tups]
+            sample.drop(sample[sample.query_order.isna()].index, inplace=True)
+            # Convert query_order back into an integral type.
+            sample["query_order"] = sample.query_order.astype(int)
+            sample.reset_index(drop=False, inplace=True)
+            assert sample.query_order.is_monotonic_increasing
             window_index_map[tbl] = sample
 
         # Let's rollback the index.
@@ -230,6 +242,14 @@ def __gen_exec_features(input_dir, connection, work_prefix, wa, buckets):
     logger.info("Starting at %s", datetime.now())
     window_index_map = build_window_indexes(connection, work_prefix, input_dir, [t for t in wa.table_attr_map.keys()], list(set(wa.query_table_map.values())))
 
+    # Get all the "keyspace" descriptor features.
+    if not (Path(input_dir) / "exec_features" / "keys" / "done").exists():
+        output_dir = Path(input_dir) / "exec_features/keys"
+        callback = save_bucket_keys_to_output(output_dir)
+        tbls = [t for t in wa.table_attr_map.keys() if not (Path(output_dir) / f"{t}.feather").exists()]
+        construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, data_hist=True, callback_fn=callback)
+        open(f"{input_dir}/exec_features/keys/done", "w").close()
+
     # Get all the data space features.
     if not (Path(input_dir) / "exec_features/data/done").exists():
         (Path(input_dir) / "exec_features/data/").mkdir(parents=True, exist_ok=True)
@@ -238,13 +258,6 @@ def __gen_exec_features(input_dir, connection, work_prefix, wa, buckets):
             df.to_feather(f"{input_dir}/exec_features/data/{tbl}.feather")
         open(f"{input_dir}/exec_features/data/done", "w").close()
 
-    # Get all the "keyspace" descriptor features.
-    if not (Path(input_dir) / "exec_features" / "keys" / "done").exists():
-        output_dir = Path(input_dir) / "exec_features/keys"
-        callback = save_bucket_keys_to_output(output_dir)
-        tbls = [t for t in wa.table_attr_map.keys() if not (Path(output_dir) / f"{t}.feather").exists()]
-        construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=True, callback_fn=callback)
-        open(f"{input_dir}/exec_features/keys/done", "w").close()
     logger.info("Finished at %s", datetime.now())
 
 
@@ -283,7 +296,7 @@ def __gen_data_page_features(input_dir, engine, connection, work_prefix, wa, buc
             output_dir = Path(input_dir) / f"data_page_{slice_fragment}/keys"
             callback = save_bucket_keys_to_output(output_dir)
             tbls = [t for t in tables if not (Path(output_dir) / f"{t}.feather").exists()]
-            construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=False, gen_op=True, callback_fn=callback)
+            construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, data_hist=False, callback_fn=callback)
             open(f"{input_dir}/data_page_{slice_fragment}/keys/done", "w").close()
 
         # Truncate off the first value; this is because we want queries that span [t=0, t=1] to be assigned window 0.
@@ -301,7 +314,9 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
 
     step = [int(i) for i in concurrency_steps.split(",")]
     data = pd.read_csv(f"{input_dir}/histograms.csv")
-    data = data[data.pid != data.iloc[0].pid]
+    if data.pid.nunique() > 1:
+        # This is to handle the awkward case where the collector isn't captured.
+        data = data[data.pid != data.iloc[0].pid]
     mpi = data.pid.nunique()
 
     try:
@@ -326,11 +341,10 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
 
         # Get the query order ranges.
         with connection.transaction() as tx:
-            # Create a temporary index that we will destroy.
+            # Create a temporary index that will be destroyed.
             connection.execute(f"CREATE INDEX ON {work_prefix}_mw_queries_args (unix_timestamp)")
 
-            # The times mark the end of a window.
-            # So we find the corresponding largest query_order that is before the end of the window.
+            # The times mark the end of a window. So we find the corresponding largest query_order that is before the end of the window.
             qo = """
                 SELECT nr - 1 AS window_index, a.query_order FROM unnest(array[{times}]) WITH ORDINALITY AS u(elem, nr),
                 LATERAL (
@@ -351,8 +365,10 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
             for s in step:
                 logger.info("Computing query access patterns under step: %s", s)
                 # Segment the query orders based on the step size.
-                # We need to prepend 0, because "window 0" is technically [0, time_us[0]]
-                qos_range = [0] + [time_us.query_order[i] for i in range(s - 1, time_us.shape[0], s)]
+                #
+                # We prepend 1 because 1 is the first valid "query_order". This is also a function of how
+                # the first valid insert_version for a data slot is 1.
+                qos_range = [1] + [time_us.query_order[i] for i in range(s - 1, time_us.shape[0], s)]
 
                 # Force the end so we can then later drop everything that happens afterwards.
                 if qos_range[-1] != time_us.iloc[-1].query_order:
@@ -365,7 +381,7 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
                 tbls = [t for t in wa.table_attr_map.keys() if not (Path(output_dir) / f"{t}.feather").exists()]
                 window_index_map = {t:qos for t in tbls}
                 if len(tbls) > 0:
-                    construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, gen_data=False, gen_op=True, callback_fn=callback)
+                    construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, data_hist=False, callback_fn=callback)
 
                 # once again, we truncate off the first value so we can get a "window 0" (since all values < first element is window 0).
                 # in this case, we just strip off our dummy 0 that was added to mutate endpoints into corresponding start points.
@@ -381,7 +397,7 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
 
         open(f"{input_dir}/concurrency/data_done", "w").close()
 
-    # Now we start generating the gaussian fits and curves.
+    # Now we start generating the fits and curves.
     def convert(n):
         if n in ["window_index", "elapsed_slice", "pid", "time"]:
             return n
@@ -406,7 +422,7 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
 
     # Step the windows in this sequence.
     for s in step:
-        logger.info("Computing gaussian windows with step function: %s", s)
+        logger.info("Computing distribution windows with step function: %s", s)
         if (Path(input_dir) / f"concurrency/step{s}/frame.feather").exists():
             continue
 
@@ -504,7 +520,7 @@ class ExecFeatureSynthesisCLI(cli.Application):
     slice_window = cli.SwitchAttr(
         "--slice-window",
         str,
-        default="10000",
+        default="1000",
         help="Slice window to use for data.",
     )
 

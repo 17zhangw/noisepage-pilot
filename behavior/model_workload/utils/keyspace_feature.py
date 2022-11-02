@@ -1,4 +1,5 @@
 import json
+from tqdm import tqdm
 import glob
 import pandas as pd
 import numpy as np
@@ -106,145 +107,220 @@ def build_table_exec(logger, connection, work_prefix, tables):
             logger.info("Finished executing: %s", c.rowcount)
 
 
-def __build_dist_query(work_prefix, tbl, att_keys, query_orders, buckets, compute_data, compute_optype):
-    sqls = []
-    query_orders = [str(l) for l in query_orders]
-
-    # Extract a nesting of window index to query orders.
-    # [query_order[0], query_order[1]] is window 0; everything that happens before is folded in.
-    window_cte = """
-        CREATE UNLOGGED TABLE w WITH (autovacuum_enabled=OFF) AS
-        (SELECT nr-1 AS window_index, elem::integer as point FROM UNNEST(ARRAY[{query_orders}]) WITH ORDINALITY AS u(elem, nr))
-    """.format(query_orders=",".join(query_orders))
-    sqls.append(window_cte)
-    sqls.append("CREATE INDEX w_idx on w (window_index)")
-
-    # data statistics CTE. Compute min/max based on the visibility at each window start point.
-    extracts = [f"s{2*i}.{k} as min_{k}, s{2*i+1}.{k} as max_{k}\n" for i, k in enumerate(att_keys)]
-    extract_tbls = ["""
-        LATERAL (
-            SELECT {k} FROM {work_prefix}_{tbl} a
-            WHERE a.insert_version <= w.point AND (a.delete_version IS NULL or a.delete_version >= w.point)
-            ORDER BY {k} ASC LIMIT 1) s{min_s},
-        LATERAL(
-            SELECT {k} FROM {work_prefix}_{tbl} a
-            WHERE a.insert_version <= w.point AND (a.delete_version IS NULL or a.delete_version >= w.point)
-            ORDER BY {k} DESC LIMIT 1) s{max_s}
-        """.format(k=k, work_prefix=work_prefix, tbl=tbl, min_s=2*i, max_s = 2*i+1) for i, k in enumerate(att_keys)]
-
-    base_data_summary_cte = """
-        CREATE UNLOGGED TABLE data_state WITH (autovacuum_enabled=OFF) AS (
-        SELECT w.window_index,
-               {extract_columns}
-               FROM w, {extract_tbls}
-        )
-    """.format(extract_columns=",".join(extracts), extract_tbls=",".join(extract_tbls))
-    sqls.append(base_data_summary_cte)
-    sqls.append("CREATE INDEX data_state_idx ON data_state (window_index)")
-
-    # Try and pre-warm since these are big indexes.
-    sqls.extend([f"SELECT pg_prewarm('{work_prefix}_{tbl}_hits_{i}')" for i in range(len(att_keys))])
-
-    # hits statistics CTE.
-    diff_keys = [f"LEAST(h.min_{k}, d.min_{k}) AS min_{k},\nGREATEST(h.max_{k}, d.max_{k}) AS max_{k}\n" for k in att_keys]
-    extract_tbls = ["""
-        LATERAL (
-            SELECT {k} FROM {work_prefix}_{tbl}_hits a
-            WHERE a.query_order >= w2.point AND a.query_order <= w.point
-            ORDER BY {k} ASC LIMIT 1) s{min_s},
-        LATERAL(
-            SELECT {k} FROM {work_prefix}_{tbl}_hits a
-            WHERE a.query_order >= w2.point AND a.query_order <= w.point
-            ORDER BY {k} DESC LIMIT 1) s{max_s}
-        """.format(k=k, work_prefix=work_prefix, tbl=tbl, min_s=2*i, max_s = 2*i+1) for i, k in enumerate(att_keys)]
-    hits_data_cte = """
-        CREATE UNLOGGED TABLE hits_state WITH (autovacuum_enabled=OFF) AS
-        (
-            SELECT h.window_index,
-            h.point,
-            {diff_keys}
-            FROM (
-                SELECT w.window_index - 1 as window_index,
-                w.point,
-                {extract_columns}
-                FROM w, w as w2, {extract_tbls}
-                WHERE w.window_index > 0 AND w.window_index = w2.window_index + 1
-            ) h, data_state d WHERE h.window_index = d.window_index
-        )
-    """.format(diff_keys=",".join(diff_keys), extract_columns=",".join(extracts), extract_tbls=",".join(extract_tbls))
-    sqls.append(hits_data_cte)
-    sqls.append("CREATE INDEX hits_state_idx ON hits_state (window_index)")
-
-    # For hits, We remove the first query_order since we want to use the fact
-    # that width_bucket() less than the first element = 0. that way we are adjusting over
-    # the correct target window; and so we compute hits_state such that min/max is with
-    # regards to what happens in the interval.
-    clauses = [(f"width_bucket(CASE WHEN h.min_{k} = h.max_{k} THEN 1.0 ELSE (a.{k} - h.min_{k})::float / (h.max_{k} - h.min_{k}) END, 0.0, 1.0, {buckets-1})-1", k) for k in att_keys]
-    preclude = "h.window_index " if compute_data or not compute_optype else "h.window_index, a.optype "
-    f = "a.insert_version <= h.point AND (a.delete_version IS NULL OR a.delete_version >= h.point)" if compute_data \
-        else "width_bucket(a.query_order, ARRAY[{qo}]) = h.window_index".format(qo=",".join(query_orders[1:]))
-    dist_sql = """
-        CREATE UNLOGGED TABLE data WITH (autovacuum_enabled=OFF) AS (
-            SELECT {preclude},
-                   {clauses},
-                   count(1) as freq
-              FROM {work_prefix}_{tbl} a, hits_state h
-             WHERE {filter}
-             GROUP BY GROUPING SETS ({groups})
-        )
-    """.format(
-        preclude=preclude,
-        clauses=",".join([f"{c[0]} as {c[1]}" for c in clauses]),
-        work_prefix=work_prefix,
-        tbl=tbl if compute_data else tbl + "_hits",
-        filter=f,
-        groups=",".join([f"({preclude}, {c[0]})\n" for c in clauses])
-    )
-    sqls.append(dist_sql)
-    sqls.append("SELECT * FROM data")
-    return sqls, ["w", "data_state", "hits_state", "data"]
-
-
-def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_orders, buckets, compute_data, compute_optype=False):
-    # Generate all the SQLs we need to execute.
-    sqls, purge_tbls = __build_dist_query(work_prefix, tbl, att_keys, query_orders, buckets, compute_data, compute_optype)
-
-    with open("/tmp/query", "w") as f:
-        for s in sqls:
-            f.write(s)
-
-    # Now execute the SQLs; take the last result.
-    for i, s in enumerate(sqls):
-        logger.info("Executing SQL: [%s/%s]", i+1, len(sqls))
-        result = cursor.execute(s)
+def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_orders, buckets, data_hist=False):
+    # NOTE that we assume the following of query_orders.
+    #
+    # window=0 contains all queries [query_orders[0], query_orders[1])
+    # window=1 contains all queries [query_orders[1], query_orders[2])
+    # ...
+    #
+    # By this definition, query_orders are window start points!
+    query_orders = [str(q) for q in query_orders]
 
     output_tuples = []
-    rows = [r for r in result]
-    columns = ["window_index"] + (["optype"] if not compute_data and compute_optype else []) + att_keys + ["freq_count"]
-    df = pd.DataFrame(rows, columns=columns)
+    def create_histograms(window, optype, maintenance_body, normalizer):
+        atts = maintenance_body.keys()
+        for att in atts:
+            subdict = maintenance_body[att]
+            if len(subdict) == 0:
+                # Window did not do anything to this key.
+                continue
 
-    gb = ["window_index"] if compute_data or not compute_optype else ["window_index", "optype"]
-    for att in att_keys:
-        subframe = df[~df[att].isna()]
-        for grp, frame in subframe.groupby(by=gb):
-            total = frame.freq_count.sum()
-            bucket_list = np.zeros(buckets)
-            np.put(bucket_list, frame[att].values.astype(int), frame.freq_count / total)
-            if compute_data:
-                output_tuples.append([grp, "data", att, bucket_list.tolist()])
-            elif not compute_optype:
-                output_tuples.append([grp, "all", att, bucket_list.tolist()])
-            else:
-                opname = OpType(grp[1])
-                output_tuples.append([grp[0], opname.name, att, bucket_list.tolist()])
+            keys = [k for k in subdict.keys()]
+            values = [subdict[k] for k in keys]
+
+            min_k = normalizer[f"min_{att}"]
+            max_k = normalizer[f"max_{att}"]
+            keys = [1.0 if min_k == max_k else (k - min_k) / (max_k - min_k) for k in keys]
+
+            # Guarantee that we are already in the 0.0 and 1.0 range.
+            assert np.max(keys) <= 1.0
+            assert np.min(keys) >= 0.0
+
+            bins, _ = np.histogram(keys, bins=buckets, range=(0.0, 1.0), weights=values)
+            bins = bins.astype(np.float)
+            assert np.sum(bins) > 0
+            bins /= np.sum(bins)
+
+            output_tuples.append([window, optype, att, bins.tolist()])
+
+    # Generate the query template.
+    query_template = """
+        SELECT {extract_columns}, b.bucket, count(1) as count
+        FROM (
+            SELECT *, width_bucket({column}, ARRAY[{query_orders}]) as bucket
+            FROM {work_prefix}_{tbl} {filter}) b
+        GROUP BY GROUPING SETS ({groups});
+    """
+
+    # First get all the relevant data.
+    def acquire_base_data():
+        # The trick we observe here is that "data" that started in the database has an unset insert_version.
+        # This unset insert_version means that it'll get assigned to bucket = 0 since they'll be less than query_orders[0].
+        #
+        # Furthermore, "data" is concerned with the data when the window executes so we don't (1-shift) the query_orders.
+        # "data": window-0 is technically data that exists before query_orders[0]
+        #       : window-1 is data that exists before query_orders[1].
+        #
+        # Compute the inserts associated with each window.
+        extract_columns = [f"b.{k}" for k in att_keys]
+        groups = [f"(b.bucket, b.{k})" for k in att_keys]
+        insert_frame = query_template.format(
+            extract_columns=",".join(extract_columns),
+            column="insert_version",
+            query_orders=",".join(query_orders),
+            work_prefix=work_prefix,
+            tbl=tbl,
+            filter="",
+            groups=",".join(groups)
+        )
+
+        insert_rows = [r for r in cursor.execute(insert_frame)]
+
+        # Compute the deletes associated with each window.
+        delete_frame = query_template.format(
+            extract_columns=",".join(extract_columns),
+            column="delete_version",
+            query_orders=",".join(query_orders),
+            work_prefix=work_prefix,
+            tbl=tbl,
+            filter="WHERE delete_version > 0",
+            groups=",".join(groups)
+        )
+        insert_rows.extend([r for r in cursor.execute(delete_frame)])
+
+        # Create the joint frame.
+        columns = att_keys + ["bucket", "freq_count"]
+        data_frame = pd.DataFrame(insert_rows, columns=columns)
+        data_frame["optype"] = "data"
+
+        # When computing the keyspace touched, we need to 1-shift the query orders.
+        # This is because we want all queries between [query_orders[0], query_orders[1]) to be mapped to 0.
+        # This is equivalent to dropping query_orders[0]
+        extract_columns = [f"b.{k}" for k in att_keys] + ["b.optype"]
+        columns = att_keys + ["optype", "bucket", "freq_count"]
+        groups = [f"(b.bucket, b.optype, b.{k})" for k in att_keys]
+        insert_frame = query_template.format(
+            extract_columns=",".join(extract_columns),
+            column="query_order",
+            query_orders=",".join(query_orders[1:]),
+            work_prefix=work_prefix,
+            tbl=tbl + "_hits",
+            filter="",
+            groups=",".join(groups)
+        )
+
+        # Now we have everything in one huge frame.
+        data_frame = pd.concat([data_frame, pd.DataFrame([r for r in cursor.execute(insert_frame)], columns=columns)], ignore_index=True)
+        # Tracks the actual data on disk evolution across windows.
+        content_body = {k: {} for k in att_keys}
+        window_normalizer = {}
+        frame = data_frame.sort_values(by=["bucket"], ignore_index=True)
+        def add_normalizer(bucket, content_body, touch_body):
+            window_normalizer[bucket] = {}
+            for k in content_body:
+                min_k = min(content_body[k])
+                max_k = max(content_body[k])
+                if f"min_{k}" in touch_body:
+                    min_k = min(min_k, touch_body[f"min_{k}"])
+                    max_k = max(max_k, touch_body[f"max_{k}"])
+
+                window_normalizer[bucket][f"min_{k}"] = min_k
+                window_normalizer[bucket][f"max_{k}"] = max_k
+
+        with tqdm(total=frame.bucket.max(), leave=False) as pbar:
+            cur_bucket = 0
+            # Tracks the tampered keys in this particular window.
+            touch_body = {}
+            for t in tqdm(frame.itertuples(), leave=False):
+                # If we've encountered a new bucket.
+                if t.bucket != cur_bucket:
+                    add_normalizer(cur_bucket, content_body, touch_body)
+                    cur_bucket = t.bucket
+                    # Reset the touch tracker.
+                    touch_body = {}
+                    pbar.update(1)
+
+                for key in att_keys:
+                    value = getattr(t, key)
+                    if not np.isnan(value):
+                        if t.optype == "data":
+                            # If this is a data tuple, update the actual data tracker.
+                            if value not in content_body[key]:
+                                content_body[key][value] = t.freq_count
+                            else:
+                                content_body[key][value] += t.freq_count
+                        else:
+                            # Otherwise update the mutate tracker.
+                            if f"min_{key}" not in touch_body:
+                                touch_body[f"min_{key}"] = value
+                                touch_body[f"max_{key}"] = value
+                            else:
+                                if touch_body[f"min_{key}"] > value:
+                                    touch_body[f"min_{key}"] = value
+                                if touch_body[f"max_{key}"] < value:
+                                    touch_body[f"max_{key}"] = value
+
+            add_normalizer(cur_bucket, content_body, touch_body)
+
+        # Pad out the window_normalizer in a "state-preserving manner".
+        for i in range(len(query_orders) + 1):
+            if i not in window_normalizer:
+                # Take the closest stats from the window before.
+                j = i - 1
+                while j not in window_normalizer and j > 0:
+                    j -= 1
+                assert j in window_normalizer
+                window_normalizer[i] = window_normalizer[j]
+
+        return data_frame, window_normalizer
+
+    input_frame, window_normalizer = acquire_base_data()
+    for optype, frame in tqdm(input_frame.groupby(by=["optype"]), leave=False):
+        maintenance_body = {k: {} for k in att_keys}
+        frame = frame.sort_values(by=["bucket"], ignore_index=True)
+        with tqdm(total=frame.bucket.max(), leave=False) as pbar:
+            cur_bucket = 0
+            for t in tqdm(frame.itertuples(), leave=False):
+                if t.bucket != cur_bucket:
+                    if optype == "data" and data_hist:
+                        # Forward the "data" state through the windows.
+                        while cur_bucket < t.bucket:
+                            create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                            cur_bucket += 1
+                    elif optype != "data":
+                        create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                        maintenance_body = {k: {} for k in att_keys}
+
+                    cur_bucket = t.bucket
+                    pbar.update(1)
+
+                for key in att_keys:
+                    value = getattr(t, key)
+                    if not np.isnan(value):
+                        if value not in maintenance_body[key]:
+                            maintenance_body[key][value] = t.freq_count
+                        else:
+                            maintenance_body[key][value] += t.freq_count
+
+            # Create the histogram for the data.
+            if optype == "data" and data_hist:
+                # Forward the "data" state through the windows.
+                while cur_bucket < len(query_orders):
+                    create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                    cur_bucket += 1
+            elif optype != "data":
+                create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                maintenance_body = {k: {} for k in att_keys}
 
     columns = ["window_index", "optype", "att_name", "key_dist"]
-    for tbl in purge_tbls:
-        cursor.execute(f"DROP TABLE {tbl}")
-    return pd.DataFrame(output_tuples, columns=columns)
+    df = pd.DataFrame(output_tuples, columns=columns)
+    # Unify the optype column type as a string.
+    df["optype"] = df.optype.astype(str)
+    return df
 
 
-def construct_keyspaces(logger, connection, work_prefix, tbls, table_attr_map, window_index_map, buckets, gen_data=True, gen_op=True, callback_fn=None):
+def construct_keyspaces(logger, connection, work_prefix, tbls, table_attr_map, window_index_map, buckets, data_hist=True, callback_fn=None):
     datatypes = {}
     with connection.transaction():
         result = connection.execute("SELECT table_name, column_name, data_type FROM information_schema.columns")
@@ -276,18 +352,8 @@ def construct_keyspaces(logger, connection, work_prefix, tbls, table_attr_map, w
                 logger.info("Skipping querying keyspace distribution for %s", tbl)
                 continue
 
-            if gen_data:
-                logger.info("Querying keyspace distribution for raw data (%s): %s (%s)", attrs, tbl, datetime.now())
-                data_ks = __execute_dist_query(logger, cursor, work_prefix, tbl, attrs, query_orders, buckets, True, compute_optype=False)
-
-            logger.info("Querying keyspace distribution from access: %s (%s)", tbl, datetime.now())
-            op_ks = __execute_dist_query(logger, cursor, work_prefix, tbl, attrs, query_orders, buckets, False, compute_optype=gen_op)
-
-            if gen_data:
-                # Concat the data segment if we need to.
-                df = pd.concat([data_ks, op_ks], ignore_index=True)
-            else:
-                df = op_ks
+            logger.info("Querying keyspace distribution from access and raw data (%s): %s (%s)", attrs, tbl, datetime.now())
+            df = __execute_dist_query(logger, cursor, work_prefix, tbl, attrs, query_orders, buckets, data_hist=data_hist)
 
             if callback_fn is not None:
                 df = callback_fn(tbl, df)

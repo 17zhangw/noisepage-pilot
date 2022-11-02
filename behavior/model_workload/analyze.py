@@ -181,6 +181,9 @@ def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_onl
         query += ",".join([f"arg{i+1}" for i in range(max_arg)]) + ")"
         connection.execute(query)
 
+        query = f"CREATE INDEX {work_prefix}_mw_queries_args_1 ON {work_prefix}_mw_queries_args (query_order, unix_timestamp)"
+        connection.execute(query)
+
     logger.info("Finished loading queries in query order.")
 
 

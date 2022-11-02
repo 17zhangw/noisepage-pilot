@@ -372,19 +372,6 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
 
                     process_plan(features[0], [])
 
-        for t in table_attr_map:
-            tbl = f"{work_prefix}_{t}"
-            if tbl in datatypes:
-                logger.info("Creating a bunch of indexes on %s_hits", tbl)
-                # Create all the indexes that we need for windowing to facilitate look-ups.
-                # and try to avoid massive repeat scans of the table.
-                i = 0
-                att_keys = [k for k in datatypes[tbl].keys() if k not in ["insert_version", "delete_version"]]
-                for att in att_keys:
-                    connection.execute(f"CREATE INDEX {tbl}_hits_{i} ON {tbl}_hits ({att}, query_order)")
-                    i += 1
-                connection.execute(f"CREATE INDEX {tbl}_hits_{i} ON {tbl}_hits (query_order)")
-
     # Issue VACUUM.
     for tbl in hits_created:
         connection.execute(f"VACUUM ANALYZE {tbl}")
