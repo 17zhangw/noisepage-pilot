@@ -31,6 +31,14 @@ class BufferPageModel():
     def require_optimize():
         return False
 
+    def load_model(model_file):
+        with open(f"{model_file}/args.pickle", "rb") as f:
+            args = pickle.load(f)
+
+        model = BufferPageModel(args)
+        model.automl = AutoML(results_path=f"{model_file}/perform")
+        return model
+
     def fit(self, dataset):
         x, y = dataset[0], dataset[1]
 

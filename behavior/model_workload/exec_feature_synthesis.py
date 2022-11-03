@@ -15,7 +15,7 @@ from sqlalchemy import create_engine
 from plumbum import cli
 from behavior import BENCHDB_TO_TABLES
 from behavior.model_workload.utils import keyspace_metadata_read
-from behavior.model_workload.utils.keyspace_feature import construct_keyspaces, construct_query_states
+from behavior.model_workload.utils.keyspace_feature import construct_keyspaces, construct_query_window_stats
 from behavior.utils.process_pg_state_csvs import process_time_pg_class
 
 logger = logging.getLogger("exec_feature_synthesis")
@@ -253,7 +253,7 @@ def __gen_exec_features(input_dir, connection, work_prefix, wa, buckets):
     # Get all the data space features.
     if not (Path(input_dir) / "exec_features/data/done").exists():
         (Path(input_dir) / "exec_features/data/").mkdir(parents=True, exist_ok=True)
-        data_ks = construct_query_states(logger, connection, work_prefix, wa.table_attr_map.keys(), window_index_map, buckets)
+        data_ks = construct_query_window_stats(logger, connection, work_prefix, wa.table_attr_map.keys(), window_index_map, buckets)
         for tbl, df in data_ks.items():
             df.to_feather(f"{input_dir}/exec_features/data/{tbl}.feather")
         open(f"{input_dir}/exec_features/data/done", "w").close()
@@ -380,8 +380,7 @@ def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, b
                 callback = save_bucket_keys_to_output(output_dir)
                 tbls = [t for t in wa.table_attr_map.keys() if not (Path(output_dir) / f"{t}.feather").exists()]
                 window_index_map = {t:qos for t in tbls}
-                if len(tbls) > 0:
-                    construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, data_hist=False, callback_fn=callback)
+                construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, data_hist=False, callback_fn=callback)
 
                 # once again, we truncate off the first value so we can get a "window 0" (since all values < first element is window 0).
                 # in this case, we just strip off our dummy 0 that was added to mutate endpoints into corresponding start points.

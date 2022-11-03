@@ -1,3 +1,4 @@
+import copy
 import json
 from tqdm import tqdm
 import glob
@@ -174,7 +175,6 @@ def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_order
             filter="",
             groups=",".join(groups)
         )
-
         insert_rows = [r for r in cursor.execute(insert_frame)]
 
         # Compute the deletes associated with each window.
@@ -212,15 +212,17 @@ def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_order
 
         # Now we have everything in one huge frame.
         data_frame = pd.concat([data_frame, pd.DataFrame([r for r in cursor.execute(insert_frame)], columns=columns)], ignore_index=True)
+
         # Tracks the actual data on disk evolution across windows.
         content_body = {k: {} for k in att_keys}
+        content_range_body = {k: {} for k in att_keys}
         window_normalizer = {}
         frame = data_frame.sort_values(by=["bucket"], ignore_index=True)
         def add_normalizer(bucket, content_body, touch_body):
             window_normalizer[bucket] = {}
             for k in content_body:
-                min_k = min(content_body[k])
-                max_k = max(content_body[k])
+                min_k = content_range_body[f"min_{k}"]
+                max_k = content_range_body[f"max_{k}"]
                 if f"min_{k}" in touch_body:
                     min_k = min(min_k, touch_body[f"min_{k}"])
                     max_k = max(max_k, touch_body[f"max_{k}"])
@@ -250,6 +252,22 @@ def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_order
                                 content_body[key][value] = t.freq_count
                             else:
                                 content_body[key][value] += t.freq_count
+
+                            # Remove the key from content_body if it's gone to 0.
+                            if content_body[key][value] == 0:
+                                del content_body[key][value]
+                                content_range_body[f"min_{key}"] = min(content_body[key])
+                                content_range_body[f"max_{key}"] = max(content_body[key])
+                            else:
+                                # Otherwise update the mutate tracker.
+                                if f"min_{key}" not in content_range_body:
+                                    content_range_body[f"min_{key}"] = value
+                                    content_range_body[f"max_{key}"] = value
+                                else:
+                                    if content_range_body[f"min_{key}"] > value:
+                                        content_range_body[f"min_{key}"] = value
+                                    if content_range_body[f"max_{key}"] < value:
+                                        content_range_body[f"max_{key}"] = value
                         else:
                             # Otherwise update the mutate tracker.
                             if f"min_{key}" not in touch_body:
@@ -262,6 +280,7 @@ def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_order
                                     touch_body[f"max_{key}"] = value
 
             add_normalizer(cur_bucket, content_body, touch_body)
+            pbar.update(1)
 
         # Pad out the window_normalizer in a "state-preserving manner".
         for i in range(len(query_orders) + 1):
@@ -305,13 +324,35 @@ def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_order
 
             # Create the histogram for the data.
             if optype == "data" and data_hist:
+                normalizer_hist_cache = []
+
                 # Forward the "data" state through the windows.
+                create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                normalizer_hist_cache.append((window_normalizer[cur_bucket], output_tuples[-1]))
+                cur_bucket += 1
+
+                # Apply a savings optimization since this can potentially be somewhat expensive.
                 while cur_bucket < len(query_orders):
-                    create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                    inserted = False
+                    for (normalizer, hist) in normalizer_hist_cache:
+                        if normalizer == window_normalizer[cur_bucket]:
+                            # The normalizer is the same, our inputs are the same, so just copy.
+                            hist = copy.deepcopy(hist)
+                            hist[0] = cur_bucket
+                            output_tuples.append(hist)
+                            inserted = True
+                            break
+
+                    if not inserted:
+                        # The normalizer is different, so re-compute with the new normalizer.
+                        create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                        normalizer_hist_cache.append((window_normalizer[cur_bucket], output_tuples[-1]))
+
                     cur_bucket += 1
             elif optype != "data":
                 create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
                 maintenance_body = {k: {} for k in att_keys}
+            pbar.update(1)
 
     columns = ["window_index", "optype", "att_name", "key_dist"]
     df = pd.DataFrame(output_tuples, columns=columns)
@@ -339,11 +380,15 @@ def construct_keyspaces(logger, connection, work_prefix, tbls, table_attr_map, w
                 # Assume it is a data frame then.
                 query_orders = window_index_map[tbl].query_order.values
 
+            # This logic will yoink histograms for all the attributes of the table.
+            # And not exactly whether it is in the table keyspace or not.
             attrs = []
             for a in table_attr_map[tbl]:
                 mod_tbl = f"{work_prefix}_{tbl}"
                 if mod_tbl in datatypes and a in datatypes[mod_tbl]:
                     t = datatypes[mod_tbl][a]
+                    # FIXME: We don't currently construct good histograms for textual data.
+                    # However, you could probably linearize the textual data into an access distribution.
                     if not (t == "text" or "character" in t):
                         attrs.append(a)
 
@@ -364,7 +409,7 @@ def construct_keyspaces(logger, connection, work_prefix, tbls, table_attr_map, w
     return bucket_ks
 
 
-def construct_query_states(logger, connection, work_prefix, tbls, window_index_map, buckets):
+def construct_query_window_stats(logger, connection, work_prefix, tbls, window_index_map, buckets):
     tbl_ks = {}
     agg_stats = [
         "num_modify_tuples",

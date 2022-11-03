@@ -36,6 +36,9 @@ def get_datatypes(connection):
 
 def load_initial_data(logger, connection, work_prefix, input_dir, table_attr_map, table_keyspace_map):
     # Load the data.
+    pg_class = pd.read_csv(f"{input_dir}/pg_class.csv")
+    pg_attribute = pd.read_csv(f"{input_dir}/pg_attribute.csv")
+
     with connection.transaction():
         for tbl in table_attr_map.keys():
             if len(table_attr_map[tbl]) == 0:
@@ -54,15 +57,23 @@ def load_initial_data(logger, connection, work_prefix, input_dir, table_attr_map
             input_frame["delete_version"] = input_frame.delete_version.astype("Int32")
             input_frame.to_csv(f"/tmp/{work_prefix}_{tbl}.csv", index=False)
 
+            cls = pg_class[pg_class.relname == tbl].iloc[0]
+
             # This isn't efficient by any means...
             sql = f"CREATE UNLOGGED TABLE {work_prefix}_{tbl} ("
             fields = []
             for col in input_frame.columns:
-                if pd_types.is_integer_dtype(input_frame.dtypes[col]):
+                # Use the pg_attribute component to determine if it is a string or not.
+                att = pg_attribute[(pg_attribute.attrelid == cls.oid) & (pg_attribute.attname == col)]
+                if att.shape[0] > 0 and att.iloc[0].attlen == -1:
+                    # This is a varying text field.
+                    fields.append((col, 'text'))
+                elif pd_types.is_integer_dtype(input_frame.dtypes[col]):
                     fields.append((col, 'integer'))
                 elif pd_types.is_float_dtype(input_frame.dtypes[col]):
                     fields.append((col, 'float8'))
                 else:
+                    # This is a varying text field.
                     fields.append((col, 'text'))
             sql += ",".join([f"{t[0]} {t[1]}" for t in fields])
             sql += ") WITH (autovacuum_enabled = OFF)"
@@ -110,6 +121,8 @@ def load_initial_data(logger, connection, work_prefix, input_dir, table_attr_map
 
         # Vacuum and analyze all the tables.
         connection.execute(f"VACUUM ANALYZE {work_prefix}_{tbl}")
+    connection.execute(f"VACUUM ANALYZE {work_prefix}_mw_queries_args")
+    connection.execute(f"VACUUM ANALYZE {work_prefix}_mw_queries")
 
 
 def compute_data_change_frames(logger, connection, work_prefix, wa):
@@ -144,7 +157,7 @@ def compute_data_change_frames(logger, connection, work_prefix, wa):
         # and delete_version control when a slot is visible. In multi-concurrency setups, the query_order
         # is only an approximation of when a query might be visible.
 
-        useful_args = [(k,v) for k, v in query_template_map[query].items() if k in pk_keys or k in all_keys]
+        useful_args = [(k,v) for (_, k), (_, v) in query_template_map[query].items() if k in pk_keys or k in all_keys]
         if query.lower().startswith("insert"):
             query = "SELECT " + ",".join([f"{arg}::{get_type(datatypes, work_prefix, tbl, att)} as {att}" for att, arg in useful_args])
             query += f", query_order from {work_prefix}_mw_queries_args where optype = {OpType.INSERT.value} and target = '{tbl}' and query_id = {qid}"
@@ -167,54 +180,78 @@ def compute_data_change_frames(logger, connection, work_prefix, wa):
         # don't require index inserts if a HOT is determined to be valid. Else we need both the
         # "old" keys as DELETE and the "new" keys as INSERT.
 
-# These arguments are a little strange.
-#
-# query_tbl: references the original target that we need to use to filter mw_queries_args.
-# This is tied to what the query is doing and is not related to the "hits" being analyzed.
-#
-# target: describes the table's hits that we are analyzing. This is always a single table
-# reference even if the original query is a multi-way join.
-#
-# allowed_tbls: describes the set of tables on which we are allowed to consider predicates.
-# For fully-specified hits, this *must* be empty; for single-tables, this is [target].
-# for multi-way joins, this is the "information-channel" from the left.
-def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, query_tbl, plan_generation, target, allowed_tbls):
+
+def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, query_tbl, plan_generation, pid, target, allowed_tbls):
+    # These arguments are a little strange.
+    #
+    # query_tbl: references the original target that we need to use to filter mw_queries_args.
+    # This is tied to what the query is doing and is not related to the "hits" being analyzed.
+    #
+    # target: describes the table's hits that we are analyzing. This is always a single table
+    # reference even if the original query is a multi-way join.
+    #
+    # allowed_tbls: describes the set of tables on which we are allowed to consider predicates.
+    # For fully-specified hits, this *must* be empty; for single-tables, this is [target].
+    # for multi-way joins, this is the "information-channel" from the left.
     query_template_map = wa.query_template_map
     table_attr_map = wa.table_attr_map
-    attr_table_map = wa.attr_table_map
     query_sorts_map = wa.query_sorts_map
 
     predicates = []
     use_tbls = set([target])
     rel_keys = table_attr_map[target]
+    allowed_set_tbls = set(allowed_tbls)
 
     # Consider all the predicates that are potentially valid.
-    for k, v in query_template_map[query].items():
-        norm_k = k[:-5] if k.endswith("_high") else (k[:-6] if k.endswith("_loweq") else k)
-        if norm_k not in attr_table_map:
+    for (ltbl, lkey), (rtbl, rkey) in query_template_map[query].items():
+        norm_lkey = lkey
+        if lkey.endswith("_high"):
+            norm_lkey = lkey[:-5]
+        elif lkey.endswith("_leq"):
+            norm_lkey = lkey[:-4]
+        elif lkey.endswith("_heq"):
+            norm_lkey = lkey[:-4]
+        elif lkey.endswith("_low"):
+            norm_lkey = lkey[:-4]
+
+        if ltbl not in table_attr_map and norm_lkey not in table_attr_map[ltbl]:
             # uh-oh
             continue
 
-        if attr_table_map[norm_k] not in allowed_tbls:
+        if not ltbl in allowed_set_tbls:
             # We are not allowed to consider this argument.
             continue
 
-        if not k.startswith("arg") and not v.startswith("arg"):
-            # equi-join.
-            if v in attr_table_map and attr_table_map[v] in allowed_tbls:
-                predicates.append(f" {k} = {v} ")
-                use_tbls.add(attr_table_map[v])
-        elif k.endswith("_high") and v.startswith("arg"):
-            k = k[:-5]
-            ty = get_type(datatypes, work_prefix, attr_table_map[k], k)
-            predicates.append(f" {k} < a.{v}::{ty} ")
-        elif k.endswith("_loweq") and v.startswith("arg"):
-            k = k[:-6]
-            ty = get_type(datatypes, work_prefix, attr_table_map[k], k)
-            predicates.append(f" {k} >= a.{v}::{ty} ")
-        elif v.startswith("arg"):
-            ty = get_type(datatypes, work_prefix, attr_table_map[k], k)
-            predicates.append(f" {k} = a.{v}::{ty} ")
+        if not norm_lkey.startswith("arg") and not rkey.startswith("arg"):
+            if rtbl in allowed_tbls:
+                assert not rkey.endswith("_high") and not rkey.endswith("_loweq")
+                predicates.append(f" {work_prefix}_{ltbl}.{norm_lkey} = {work_prefix}_{rtbl}.{rkey} ")
+                use_tbls.add(rtbl)
+        elif lkey.endswith("_high") and rkey.startswith("arg"):
+            assert rtbl is None
+            ty = get_type(datatypes, work_prefix, ltbl, norm_lkey)
+            predicates.append(f" {work_prefix}_{ltbl}.{norm_lkey} < a.{rkey}::{ty} ")
+            use_tbls.add(ltbl)
+        elif lkey.endswith("_leq") and rkey.startswith("arg"):
+            assert rtbl is None
+            ty = get_type(datatypes, work_prefix, ltbl, norm_lkey)
+            predicates.append(f" {work_prefix}_{ltbl}.{norm_lkey} >= a.{rkey}::{ty} ")
+            use_tbls.add(ltbl)
+        elif lkey.endswith("_heq") and rkey.startswith("arg"):
+            assert rtbl is None
+            ty = get_type(datatypes, work_prefix, ltbl, norm_lkey)
+            predicates.append(f" {work_prefix}_{ltbl}.{norm_lkey} <= a.{rkey}::{ty} ")
+            use_tbls.add(ltbl)
+        elif lkey.endswith("_low") and rkey.startswith("arg"):
+            assert rtbl is None
+            ty = get_type(datatypes, work_prefix, ltbl, norm_lkey)
+            predicates.append(f" {work_prefix}_{ltbl}.{norm_lkey} > a.{rkey}::{ty} ")
+            use_tbls.add(ltbl)
+        elif rkey.startswith("arg"):
+            assert rtbl is None
+            ty = get_type(datatypes, work_prefix, ltbl, norm_lkey)
+            predicates.append(f" {work_prefix}_{ltbl}.{norm_lkey} = a.{rkey}::{ty} ")
+            use_tbls.add(ltbl)
 
     limit, orderby = query_sorts_map[qid]
     orderbys = orderby.split(",")
@@ -222,12 +259,12 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
     if limit > 0:
         for clause in orderbys:
             s = clause.split(" ")
-            key, order = s[0], s[1]
-            if key in attr_table_map and attr_table_map[key] in use_tbls and attr_table_map[key] in allowed_tbls:
+            tbl, col, order = s[0], s[1], s[2]
+            if tbl in table_attr_map and col in table_attr_map[tbl] and tbl in use_tbls and tbl in allowed_set_tbls:
                 # We are allowed to try and use the order by to enforce the query.
                 # The interesting observation is that in the case we have exact args, allowed_tbls = [].
                 # That means we don't care about the clause at all!
-                sort_clauses.append(clause)
+                sort_clauses.append(f"{work_prefix}_{tbl}.{col}")
     lateral = len(sort_clauses) > 0 and limit > 0
 
     q = f"INSERT INTO {work_prefix}_{target}_hits (query_order, statement_timestamp, unix_timestamp, optype, " + ",".join(rel_keys) + ") "
@@ -235,17 +272,19 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
     q += f"SELECT a.query_order, a.statement_timestamp, a.unix_timestamp, a.optype"
     if len(allowed_tbls) == 0:
         assert len(sort_clauses) == 0
+        assert plan_generation is None and pid is None
         # We extract the fields directly from mw_queries_args.
         args = []
         for k in rel_keys:
-            v = query_template_map[query][k]
-            ty = get_type(datatypes, work_prefix, attr_table_map[k], k)
+            rtbl, v = query_template_map[query][(query_tbl, k)]
+            assert rtbl is None
+            ty = get_type(datatypes, work_prefix, query_tbl, k)
             args.append(f"a.{v}::{ty}")
         q += "," + ",".join(args)
         q += f" FROM {work_prefix}_mw_queries_args a WHERE a.target = '{query_tbl}' and a.query_id = {qid}"
     else:
         # Attach the correct table prefix depending on if we need to lateral join or not.
-        tbl_prefix = "b." if lateral else ""
+        tbl_prefix = "b." if lateral else f"{work_prefix}_{target}."
         q += "," + ",".join([f"{tbl_prefix}{k}" for k in rel_keys])
 
         q += f" FROM {work_prefix}_mw_queries_args a, "
@@ -272,6 +311,9 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
         if plan_generation is not None:
             q += f" and a.generation = {plan_generation}"
 
+        if pid is not None:
+            q += f" and a.pid = {pid}"
+
     logger.info(q)
     c = connection.execute(q)
     logger.info("Finished executing with: %s", c.rowcount)
@@ -279,7 +321,6 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
 
 def compute_underspecified(logger, connection, work_prefix, wa, plans):
     table_attr_map = wa.table_attr_map
-    attr_table_map = wa.attr_table_map
     reloid_table_map = wa.reloid_table_map
     table_keyspace_map = wa.table_keyspace_map
     query_template_map = wa.query_template_map
@@ -288,10 +329,11 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
     datatypes = get_datatypes(connection)
 
     hits_created = []
-    with connection.transaction():
+    with connection.transaction() as txn:
         for t in table_attr_map:
             tbl = f"{work_prefix}_{t}"
             if tbl in datatypes:
+                # Create the _hits table.
                 att_keys = [k for k in datatypes[tbl].keys() if k not in ["insert_version", "delete_version"]]
                 atts = ["query_order bigint", "statement_timestamp bigint", "unix_timestamp float8", "optype int"] + [f"{k} {get_type(datatypes, work_prefix, t, k)}" for k in att_keys]
                 tbl += "_hits"
@@ -307,23 +349,28 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
             # This is to compute the keys that we are missing.
             # There is an interesting space complexity issue of whether we should precompute all of these or not.
             for interact_tbl in tbls:
-                miss = [k for _, ks in table_keyspace_map[interact_tbl].items() for k in ks if k not in query_template_map[query] or not query_template_map[query][k].startswith("arg")]
-                missing_args.update(miss)
-                all_keys.update([k for _, ks in table_keyspace_map[interact_tbl].items() for k in ks])
+                # Look through all keyspaces of the table.
+                for _, ks in table_keyspace_map[interact_tbl].items():
+                    # Look through constituent attributes in the keyspace.
+                    for k in ks:
+                        if (interact_tbl, k) not in query_template_map[query] or not query_template_map[query][(interact_tbl, k)][1].startswith("arg"):
+                            # In this case, we aren't specifying [interact_tbl].[k] in the query or it's a dependent value.
+                            missing_args.add((interact_tbl, k))
+                all_keys.update([(interact_tbl, k) for _, ks in table_keyspace_map[interact_tbl].items() for k in ks])
 
             if len(all_keys) == 0:
                 # This means that we don't actually have anything of interest to say.
                 continue
 
             # FIXME(INPUT_KEY): We currently try to compute where in the keyspace we might end up touching. Perhaps the other
-            # featurization that could work is we indicate that we have no idea! That way we can communicate the underspecification
-            # of the query; but not sure if we should do that to begin with.
+            # featurization that could work is we indicate that we have no idea what the space looks like! That way we can
+            # communicate the underspecification of the query; but not sure if we should do that to begin with.
 
             if len(missing_args) == 0 and len(tbls) == 1:
-                probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, query_tbl, None, tbls[0], [])
+                probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, query_tbl, None, None, tbls[0], [])
             elif len(missing_args) > 0 and len(tbls) == 1:
                 # We have missing arguments but we are only hitting a single table.
-                probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, query_tbl, None, tbls[0], [tbls[0]])
+                probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, query_tbl, None, None, tbls[0], [tbls[0]])
             elif len(missing_args) > 0:
                 assert len(tbls) > 1
 
@@ -334,7 +381,7 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
                 #
                 # In theory we can batch this; effectively. you just need to make groups based on whether
                 # the plan structure is the same or whether they have changed. And if they have changed,
-                # welp you start a new group; since we have guarantees that generatino is strictly
+                # welp you start a new group; since we have guarantees that generation is strictly
                 # increasing over time.
                 valid_plans = plans[plans.query_id == qid]
                 for plan in valid_plans.itertuples():
@@ -354,8 +401,6 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
                             # Push the carried information forwards!
                             process_plan(child[1], carry)
                         elif nt == OperatingUnit.IndexScan.name or nt == OperatingUnit.IndexOnlyScan.name or nt == OperatingUnit.SeqScan:
-                            # We unfortunately have reached this point. So now just use a bad-case guestimation on the known good keys.
-                            # This sort of simulates no passage of information between joins.
                             key = {
                                 OperatingUnit.IndexScan.name: "IndexScan_scan_scanrelid_oid",
                                 OperatingUnit.IndexOnlyScan.name: "IndexOnlyScan_scan_scanrelid_oid",
@@ -363,7 +408,7 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
                             }[nt]
 
                             relname = reloid_table_map[f"{current_node[key]}"]
-                            probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, query_tbl, plan.generation, relname, [relname] + carry)
+                            probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, query_tbl, plan.generation, plan.pid, relname, [relname] + carry)
                             carry.append(relname)
                         else:
                             # Recurse into the children.
@@ -374,6 +419,7 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
 
     # Issue VACUUM.
     for tbl in hits_created:
+        connection.execute(f"CREATE INDEX {tbl}_qo_idx ON {tbl} (query_order)")
         connection.execute(f"VACUUM ANALYZE {tbl}")
     connection.execute(f"VACUUM ANALYZE {work_prefix}_mw_queries_args")
     connection.execute(f"VACUUM ANALYZE {work_prefix}_mw_queries")

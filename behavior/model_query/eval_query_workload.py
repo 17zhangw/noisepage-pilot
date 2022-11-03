@@ -28,6 +28,7 @@ from behavior.utils.evaluate_ou import evaluate_ou_model
 from behavior.utils.prepare_ou_data import prepare_index_input_data
 from behavior.model_workload.utils import keyspace_metadata_read
 from behavior.utils.process_pg_state_csvs import (
+    postgres_julian_to_unix,
     process_time_pg_stats,
     process_time_pg_attribute,
     process_time_pg_index,
@@ -35,6 +36,7 @@ from behavior.utils.process_pg_state_csvs import (
     build_time_index_metadata
 )
 import behavior.model_workload.models as model_workload_models
+from behavior.model_workload.utils.keyspace_feature import construct_keyspaces
 import torch
 
 logger = logging.getLogger(__name__)
@@ -967,27 +969,119 @@ def evaluate_query_plans(base_models, queries, scratch_it, output_path, eval_bat
     queries.to_feather(output_path / "query_results.feather")
 
 ##################################################################################
-# Control
+# Generate a window of OUs
 ##################################################################################
 
-def compute_ddl_changes(dir_data, tables):
-    ddl = pd.read_csv(f"{dir_data}/pg_qss_ddl.csv")
-    ddl = ddl[ddl.command == "AlterTableOptions"]
-    ff_tbl_change_map = {t: [] for t in tables}
-    for tbl in tables:
-        query_str = ddl["query"].str
-        slots = query_str.contains(tbl) & query_str.contains("fillfactor")
-        tbl_changes = ddl[slots]
-        for q in tbl_changes.itertuples():
-            root = pglast.Node(pglast.parse_sql(q.query))
-            for node in root.traverse():
-                if isinstance(node, pglast.node.Node):
-                    if isinstance(node.ast_node, pglast.ast.DefElem):
-                        if node.ast_node.defname == "fillfactor":
-                            ff = node.ast_node.arg.val
-                            ff_tbl_change_map[tbl].append((q.statement_timestamp, ff))
-    return ff_tbl_change_map
+class OUGenerationContext:
+    tables = None
+    table_keyspace_feature_map = None
+    table_feature_state = None
+    index_feature_state = None
+    shared_buffers = None
 
+    ou_models = None
+    table_feature_model = None
+    buffer_page_model = None
+    buffer_access_model = None
+    concurrency_model = None
+
+#def generate_query_ous_window(ougc, query_plans, output_dir):
+
+
+##################################################################################
+# Initialize the initial table / index feature state
+##################################################################################
+
+def initial_table_feature_state(target_conn, tables):
+    table_feature_stats = {}
+
+    # Here we assume that the "initial" state with which populate_data() was invoked with
+    # and the state at which the query stream was captured is roughly consistent (along
+    # with the state at which we are assessing pgstattuple_approx) to some degree.
+    with target_conn.cursor(row_factory=dict_row) as cursor:
+        for tbl in tables:
+            result = [r for r in cursor.execute(f"SELECT * FROM pgstattuple_approx('{tbl}')", prepare=False)][0]
+            pgc_record = [r for r in cursor.execute(f"SELECT * FROM pg_class where relname = '{tbl}'", prepare=False)][0]
+
+            ff = 100
+            if pgc_record["reloptions"] is not None:
+                for record in pgc_record["reloptions"]:
+                    for key, value in re.findall(r'(\w+)=(\w*)', record):
+                        if key == "fillfactor":
+                            ff = float(value)
+                            break
+
+            table_feature_stats[tbl] = {
+                "table_len": result["table_len"],
+                "approx_free_percent": result["approx_free_percent"] / 100.0,
+                "dead_tuple_percent": result["dead_tuple_percent"] / 100.0,
+                "approx_tuple_count": result["approx_tuple_count"],
+                "tuple_len_avg": result["approx_tuple_len"] / result["approx_tuple_count"],
+                "ff": ff,
+            }
+    return table_feature_stats
+
+
+def initial_index_feature_state(target_conn, tables, index_feature_state):
+    new_index_feature_state = {}
+    with target_conn.cursor(row_factory=dict_row) as cursor:
+        for tbl in tables:
+            sql = """
+                SELECT indexrelid, i.relname as "indrelname", t.relname as "tblname"
+                FROM pg_index, pg_class i, pg_class t
+                WHERE pg_index.indrelid = t.oid AND pg_index.indexrelid = i.oid
+                  AND t.relname = '{tbl}'
+            """.format(tbl=tbl)
+            pgi_record = [r for r in cursor.execute(sql)]
+            for pgi_rec in pgi_record:
+                indexrelid = pgi_rec["indexrelid"]
+                indname = pgi_rec["indrelname"]
+                tblname = pgi_rec["tblname"]
+                if indexrelid not in index_feature_state:
+                    result = [r for r in cursor.execute(f"SELECT * FROM pgstattuple('{indname}')", prepare=False)][0]
+                    new_index_feature_state[indexrelid] = {
+                        "indexname": indname,
+                        "table_len": result["table_len"],
+                        "approx_tuple_count": result["tuple_count"],
+                        "tuple_len_avg": 0.0 if result["tuple_count"] == 0 else result["tuple_len"] / result["tuple_count"],
+                        "num_inserts": 0,
+                    }
+                else:
+                    new_index_feature_state[indexrelid] = index_feature_state[indexrelid]
+    return new_index_feature_state
+
+##################################################################################
+# Compute the DDL Changes
+##################################################################################
+
+def compute_ddl_changes(dir_data, workload_prefix, workload_conn):
+    ddl = pd.read_csv(f"{dir_data}/pg_qss_ddl.csv")
+    ddl = ddl[(ddl.command == "AlterTableOptions") | (ddl.command == "CreateIndex") | (ddl.command == "DropIndex")]
+    ddl["unix_timestamp"] = postgres_julian_to_unix(ddl.statement_timestamp)
+    ddl.reset_index(drop=True, inplace=True)
+    if ddl.shape[0] == 0:
+        return []
+
+    sql = """
+        SELECT ord - 1, b.query_order FROM UNNEST(ARRAY[{args}]) WITH ORDINALITY AS x(time, ord),
+        LATERAL (SELECT MAX(query_order) as query_order FROM {prefix}_mw_queries_args WHERE unix_timestamp < time) b
+    """.format(
+        args=",".join([str(s) for s in ddl.unix_timestamp.values]),
+        prefix=workload_prefix)
+
+    result = [(t[0], t[1]) for t in workload_conn.execute(sql)]
+    ddl["query_order"] = np.isnan
+    ddl.loc[[t[0] for t in result], "query_order"] = [t[1] for t in result]
+    ddl.drop(ddl[ddl.query_order.isna()].index, inplace=True)
+
+    steps = []
+    for d in ddl.itertuples():
+        steps.append((d.query_order, d.query))
+    return steps
+
+##################################################################################
+# Load the Models
+##################################################################################
 
 def load_ou_models(path):
     model_dict = {}
@@ -1003,82 +1097,120 @@ def load_model(path, name):
         return None
 
     model_cls = getattr(model_workload_models, name)
-    model_dict = torch.load(path)
-
-    args = model_dict["model_args"]
-    num_outputs = model_dict["num_outputs"]
-    model = model_cls(args, num_outputs)
-    model.load_state_dict(model_dict["best_model"])
-    return model
+    return model_cls.load_model(path)
 
 
 def main(workload_conn, target_conn, workload_analysis_prefix,
          input_dir, session_sql, ou_models_path,
+         query_feature_granularity_queries,
          table_feature_model_path, buffer_page_model_path,
          buffer_access_model_path, concurrency_model_path,
-         table_feature_granularity_queries,
-         buffer_access_granularity_queries,
          concurrency_granularity_sec,
          histogram_width,
          output_dir):
 
     logger.info("Beginning eval_query_workload evaluation of %s", input_dir)
-    assert False
     target_conn.execute("SET qss_capture_enabled = OFF")
+    target_conn.execute("SET plan_cache_mode = 'force_generic_plan'")
+    target_conn.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
     if session_sql is not None and session_sql.exists():
         with open(session_sql, "r") as f:
             for line in f:
                 target_conn.execute(line)
 
-    # Load the models
-    ou_models = load_ou_models(ou_models_path)
-    table_feature_model = load_model(table_feature_model_path, "TableFeatureModel")
-    buffer_page_model = load_model(buffer_page_model_path, "BufferPageModel")
-    buffer_access_model = load_model(buffer_access_model, "BufferAccessModel")
-    concurrency_model = load_model(concurrency_model, "ConcurrencyModel")
+    ougc = OUGenerationContext()
+    ougc.ou_models = load_ou_models(ou_models_path)
+    ougc.table_feature_model = load_model(table_feature_model_path, "TableFeatureModel")
+    ougc.buffer_page_model = load_model(buffer_page_model_path, "BufferPageModel")
+    ougc.buffer_access_model = load_model(buffer_access_model_path, "BufferAccessModel")
+    ougc.concurrency_model = load_model(concurrency_model_path, "ConcurrencyModel")
 
     # Get the query order ranges.
     with workload_conn.transaction():
         r = [r for r in workload_conn.execute(f"SELECT min(query_order), max(query_order) FROM {workload_analysis_prefix}_mw_queries_args")][0]
         min_qo, max_qo = r[0], r[1]
 
+        r = [r for r in workload_conn.execute(f"SELECT a.attname FROM pg_attribute a, pg_class c WHERE a.attrelid = c.oid AND c.relname = '{workload_analysis_prefix}_mw_queries_args'")]
+        r = [int(t[0][3:]) for t in r if t[0].startswith("arg")]
+        max_arg = max(r)
+
     wa = keyspace_metadata_read(input_dir)[0]
-    tables = wa.table_attr_map.keys()
-
-    def save_bucket_keys_to_output(output):
-        def save_df_return_none(tbl, df):
-            Path(output).mkdir(parents=True, exist_ok=True)
-            df["key_dist"] = [",".join(map(str, l)) for l in df.key_dist]
-            df.to_feather(f"{output}/{tbl}.feather")
-            return None
-
-        return save_df_return_none
-
-    # Populate the buffer access keyspace.
-    if table_feature_granularity_queries != buffer_access_granularity_queries and not (Path(output_dir) / "scratch/buffer_access/done").exists():
-        query_orders = range(min_qo, max_qo, buffer_access_granularity_queries)
-        window_index_map = {t: [i for i in query_orders] for t in tables}
-        callback = save_bucket_keys_to_output(Path(output_dir) / "scratch/buffer_access")
-        construct_keyspaces(logger, workload_conn, workload_analysis_prefix, tables, wa.table_attr_map, window_index_map, histogram_width, gen_data=False, gen_op=True, callback_fn=callback)
-        open(f"{output_dir}/scratch/buffer_access/done", "w").close()
-
-    # Populate the table feature keyspace.
-    if not (Path(output_dir) / "scratch/table_feature/done").exists():
-        query_orders = range(min_qo, max_qo, table_feature_granularity_queries)
-        window_index_map = {t: [i for i in query_orders] for t in tables}
-        callback = save_bucket_keys_to_output(Path(output_dir) / "scratch/table_feature")
-        construct_keyspaces(logger, connection, work_prefix, tables, wa.table_attr_map, window_index_map, buckets, gen_data=True, gen_op=True, callback_fn=callback)
-        open(f"{output_dir}/scratch/table_feature/done", "w").close()
+    ou.tables = wa.table_attr_map.keys()
 
     shared_buffers = [r for r in target_conn.execute("SHOW shared_buffers")][0][0]
-    ddl_changes = compute_ddl_changes(input_dir, tables)
-
-    qos_windows = set(range(min_qo, max_qo, table_feature_granularity_queries) + range(min_qo, max_qo, buffer_access_granularity_queries))
+    ddl_changes = compute_ddl_changes(input_dir, workload_analysis_prefix, workload_conn)
+    qos_windows = set(range(min_qo, max_qo, query_feature_granularity_queries)) | set([q[0] for q in ddl_changes])
     qos_windows = sorted(list(qos_windows))
-    current_qo = 0
-    while current_qo < qos_windows[-1]:
-        pass
 
+    # Populate the keyspace features.
+    if not (Path(output_dir) / "scratch/keyspaces/done").exists():
+        def save_bucket_keys_to_output(output):
+            def save_df_return_none(tbl, df):
+                Path(output).mkdir(parents=True, exist_ok=True)
+                df["key_dist"] = [",".join(map(str, l)) for l in df.key_dist]
+                df.to_feather(f"{output}/{tbl}.feather")
+                return None
+            return save_df_return_none
+
+        window_index_map = {t: [i for i in qos_windows] for t in ougc.tables}
+        tables = [t for t in ougc.tables if not (Path(output_dir) / f"scratch/keyspaces/{t}.feather").exists()]
+        callback = save_bucket_keys_to_output(Path(output_dir) / "scratch/keyspaces")
+        construct_keyspaces(logger, workload_conn, workload_analysis_prefix, tables, wa.table_attr_map, window_index_map, histogram_width, callback_fn=callback)
+        open(f"{output_dir}/scratch/keyspaces/done", "w").close()
+
+    # Load the table keyspace features.
+    ougc.table_keyspace_features = {}
+    for t in ougc.tables:
+        if (Path(output_dir) / f"scratch/keyspaces/{t}.feather").exists():
+            ougc.table_keyspace_features[t] = pd.read_feather(f"{output_dir}/scratch/keyspaces/{t}.feather")
+
+    ougc.table_feature_state = initial_table_feature_state(target_conn, ougc.tables)
+    ougc.index_feature_state = initial_index_feature_state(target_conn, ougc.tables, {})
+
+    current_qo = 1
+    total_query_frames = []
+    for i, current_qo in enumerate(qos_windows):
+        upper_qo = current_qo
+        if i != len(qos_windows) - 1:
+            upper_qo = qos_windows[i+1]
+
+        # If it is time to execute a DDL statement, then execute the DDL statement.
+        for (ddl_qo, ddl_stmt) in ddl_changes:
+            if current_qo < ddl_qo:
+                break
+
+            if current_qo == ddl_qo:
+                # Reload the index feature state to acquire newly created indexes.
+                # This will also catch any deleted indexes.
+                target_conn.execute(ddl_stmt)
+                ougc.index_feature_state = initial_index_feature_state(workload_conn, tables, {})
+                ougc.shared_buffers = [r for r in target_conn.execute("SHOW shared_buffers")][0][0]
+
+        # Get all the query plans in this window and the hits count.
+        valid_tbls = [t for t in tables if (Path(output_dir) / f"scratch/keyspaces/{t}.feather").exists()]
+        joins = []
+        for tbl in valid_tbls:
+            joins.append(f"LEFT JOIN LATERAL (SELECT COUNT(1) as hits FROM {workload_analysis_prefix}_{tbl}_hits {tbl} WHERE {tbl}.query_order = a.query_order) {tbl} ON true")
+
+        query_columns = ["query_order", "query_id", "statement_timestamp", "optype", "query_text", "target", "elapsed_us"] 
+        query_columns += [f"arg{i}" for i in range(1, max_arg+1)]
+
+        sql = """
+            SELECT {tbl_outputs}
+            FROM {prefix}_mw_queries_args a
+            {joins}
+            WHERE a.query_order >= {lower_qo} AND a.query_order < {upper_qo} ORDER BY a.query_order
+        """.format(
+            prefix=workload_analysis_prefix,
+            tbl_outputs=",".join([f"a.{c}" for c in query_columns] + [f"{t}.hits as \"{t}_hits\"" for t in valid_tbls]),
+            joins="\n".join(joins),
+            lower_qo=current_qo,
+            upper_qo=upper_qo)
+
+        query_plans = pd.DataFrame([r for r in workload_conn.execute(sql)], columns=query_columns + [f"{t}_hits" for t in valid_tbls])
+        logger.info("%s", query_plans)
+        total_query_frames.append(query_plans)
+        assert False
 
 
 class EvalQueryWorkloadCLI(cli.Application):
@@ -1110,18 +1242,18 @@ class EvalQueryWorkloadCLI(cli.Application):
         help="Folder that contains all the OU models.",
     )
 
+    query_feature_granularity_queries = cli.SwitchAttr(
+        "--query-feature-granularity-queries",
+        int,
+        default=1000,
+        help="Granularity of window slices for table feature, buffer page, and buffer access model in (# queries).",
+    )
+
     table_feature_model_path = cli.SwitchAttr(
         "--table-feature-model-path",
         Path,
         default=None,
         help="Path to the table feature model that should be loaded.",
-    )
-
-    table_feature_granularity_queries = cli.SwitchAttr(
-        "--table-feature-granularity-queries",
-        int,
-        default=1000,
-        help="Granularity of window slices for table feature model in (# queries).",
     )
 
     buffer_page_model_path = cli.SwitchAttr(
@@ -1136,13 +1268,6 @@ class EvalQueryWorkloadCLI(cli.Application):
         Path,
         default=None,
         help="Path to the buffer access model that should be loaded.",
-    )
-
-    buffer_access_granularity_queries = cli.SwitchAttr(
-        "--buffer-access-granularity-queries",
-        int,
-        default=1000,
-        help="Granularity of window slices for buffer access model in (# queries).",
     )
 
     concurrency_model_path = cli.SwitchAttr(
@@ -1192,12 +1317,11 @@ class EvalQueryWorkloadCLI(cli.Application):
                      self.input_dir,
                      self.session_sql,
                      self.ou_models_path,
+                     self.query_feature_granularity_queries,
                      self.table_feature_model_path,
                      self.buffer_page_model_path,
                      self.buffer_access_model_path,
                      self.concurrency_model_path,
-                     self.table_feature_granularity_queries,
-                     self.buffer_access_granularity_queries,
                      self.concurrency_granularity_sec,
                      self.histogram_width,
                      self.output_dir)

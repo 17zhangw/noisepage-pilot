@@ -124,6 +124,16 @@ class ConcurrencyModel(nn.Module):
     def require_optimize():
         return True
 
+    def load_model(model_file):
+        model_obj = torch.load(f"{model_file}/best_model.pt")
+        model = ConcurrencyModel(model_obj["model_args"], model_obj["num_outputs"])
+        model.load_state_dict(model_obj["best_model"])
+
+        parent_dir = Path(model_file).parent
+        model.relpages_scaler = joblib.load(f"{parent_dir}/relpages_scaler.gz")
+        model.reltuples_scaler = joblib.load(f"{parent_dir}/reltuples_scaler.gz")
+        return model
+
     def __init__(self, model_args, num_outputs):
         super(ConcurrencyModel, self).__init__()
         assert num_outputs > 0

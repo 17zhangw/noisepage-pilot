@@ -198,6 +198,17 @@ class TableFeatureModel(nn.Module):
     def require_optimize():
         return True
 
+    def load_model(model_file):
+        model_obj = torch.load(f"{model_file}/best_model.pt")
+        model = TableFeatureModel(model_obj["model_args"], model_obj["num_outputs"])
+        model.load_state_dict(model_obj["best_model"])
+
+        parent_dir = Path(model_file).parent
+        model.num_pages_scaler = joblib.load(f"{parent_dir}/num_pages_scaler.gz")
+        model.tuple_count_scaler = joblib.load(f"{parent_dir}/tuple_count_scaler.gz")
+        model.tuple_len_avg_scaler = joblib.load(f"{parent_dir}/tuple_len_avg_scaler.gz")
+        return model
+
     def __init__(self, model_args, num_outputs):
         super(TableFeatureModel, self).__init__()
 

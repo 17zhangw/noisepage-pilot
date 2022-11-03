@@ -25,7 +25,7 @@ def task_workload_analyze():
     """
     Workload Analysis: perform analysis of a workload and populate all data needed for further computation.
     """
-    def workload_analyze(benchmark, input_workload, workload_only, psycopg2_conn, work_prefix, load_raw, load_initial_data, load_exec_stats):
+    def workload_analyze(benchmark, input_workload, workload_only, psycopg2_conn, work_prefix, load_raw, load_initial_data, load_deltas, load_hits, load_exec_stats):
         assert input_workload is not None
         assert work_prefix is not None
         assert len(benchmark.split(",")) == len(input_workload.split(","))
@@ -49,6 +49,12 @@ def task_workload_analyze():
         if load_initial_data is not None:
             eval_args += "--load-initial-data "
 
+        if load_deltas is not None:
+            eval_args += "--load-deltas "
+
+        if load_hits is not None:
+            eval_args += "--load-hits "
+
         if load_exec_stats is not None:
             eval_args += "--load-exec-stats "
 
@@ -62,54 +68,16 @@ def task_workload_analyze():
         "uptodate": [False],
         "verbosity": VERBOSITY_DEFAULT,
         "params": [
-            {
-                "name": "benchmark",
-                "long": "benchmark",
-                "help": "Benchmark that is being analyzed.",
-                "default": None,
-            },
-            {
-                "name": "input_workload",
-                "long": "input_workload",
-                "help": "Path to the input workload that should be analyzed.",
-                "default": None,
-            },
-            {
-                "name": "workload_only",
-                "long": "workload_only",
-                "help": "Whether the input workload is only the workload or not.",
-                "default": False,
-            },
-            {
-                "name": "psycopg2_conn",
-                "long": "psycopg2_conn",
-                "help": "psycopg2 connection string to connect to the valid database instance.",
-                "default": None,
-            },
-            {
-                "name": "work_prefix",
-                "long": "work_prefix",
-                "help": "Prefix to use for working with the database.",
-                "default": None,
-            },
-            {
-                "name": "load_raw",
-                "long": "load_raw",
-                "help": "Whether to load the raw data or not.",
-                "default": None,
-            },
-            {
-                "name": "load_initial_data",
-                "long": "load_initial_data",
-                "help": "Load the initial data.",
-                "default": None,
-            },
-            {
-                "name": "load_exec_stats",
-                "long": "load_exec_stats",
-                "help": "Whether to load the execution statistics or not.",
-                "default": None,
-            },
+            { "name": "benchmark", "long": "benchmark", "help": "Benchmark that is being analyzed.", "default": None, },
+            { "name": "input_workload", "long": "input_workload", "help": "Path to the input workload that should be analyzed.", "default": None, },
+            { "name": "workload_only", "long": "workload_only", "help": "Whether the input workload is only the workload or not.", "default": False, },
+            { "name": "psycopg2_conn", "long": "psycopg2_conn", "help": "psycopg2 connection string to connect to the valid database instance.", "default": None, },
+            { "name": "work_prefix", "long": "work_prefix", "help": "Prefix to use for working with the database.", "default": None, },
+            { "name": "load_raw", "long": "load_raw", "help": "Whether to load the raw data or not.", "default": None, },
+            { "name": "load_initial_data", "long": "load_initial_data", "help": "Load the initial data.", "default": None, },
+            { "name": "load_deltas", "long": "load_deltas", "help": "Load the deltas.", "default": None, },
+            { "name": "load_hits", "long": "load_hits", "help": "Load the hit.", "default": None, },
+            { "name": "load_exec_stats", "long": "load_exec_stats", "help": "Whether to load the execution statistics or not.", "default": None, },
         ],
     }
 

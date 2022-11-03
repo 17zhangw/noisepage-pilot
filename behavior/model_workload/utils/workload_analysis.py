@@ -5,18 +5,23 @@ from psycopg.rows import dict_row
 from behavior.model_workload.utils import OpType
 
 class WorkloadAnalysis:
+    # table_attr_map defines all attributes that might exist per table.
     table_attr_map = None
-    attr_table_map = None
-
+    # Here we construct all INDEX columns that are possibly of value.
     table_index_map = None
+    # Relation OID -> Relation name.
     reloid_table_map = None
+    # Defines the keyspace for a relation. This is taken as the INDEX space OR the PK space.
     table_keyspace_map = None
-
+    # Index OID -> Table name.
     indexoid_table_map = None
+    # Index OID -> Index name.
     indexoid_name_map = None
-
+    # Query Text -> { (tbl, col) -> (tbl, col/arg) }
     query_template_map = None
+    # (query text, qid, is_insert/update/delete) -> (target table)
     query_table_map = None
+    # qid -> (limit, order by)
     query_sorts_map = None
 
 
@@ -31,9 +36,7 @@ QUERY_CONTENT_BLOCK = [
 
 def process_schemas(connection, input_dir, tables):
     # table_attr_map defines all attributes that might exist per table.
-    # FIXME(ATTR): We hereby assume that attribute names are unique.
     table_attr_map = {t: [] for t in tables}
-    attr_table_map = {}
     reloid_table_map = {}
 
     # Here we construct all INDEX columns that are possibly of value.
@@ -86,13 +89,9 @@ def process_schemas(connection, input_dir, tables):
         pg_attribute.reset_index(drop=False, inplace=True)
         for pgatt in pg_attribute.groupby(by=["relname"]):
             tbl, atts = pgatt[0], pgatt[1]
+            atts.sort_values(by=["attnum"], inplace=True)
             if tbl in table_attr_map:
                 table_attr_map[tbl] = atts[atts.attnum >= 1].attname.values
-
-        for tbl, attrs in table_attr_map.items():
-            for attr in attrs:
-                assert attr not in attr_table_map
-                attr_table_map[attr] = tbl
 
         for tup in pg_index.itertuples():
             # Construct the indexoid_table_map.
@@ -113,10 +112,10 @@ def process_schemas(connection, input_dir, tables):
             if tup.indisprimary:
                 # Handle the primary key for the table keyspace.
                 table_keyspace_map[tup.relname][tup.relname] = table_keyspace_map[tup.relname][tup.relname_index]
-    return table_attr_map, attr_table_map, reloid_table_map, table_index_map, table_keyspace_map, indexoid_table_map, indexoid_name_map
+    return table_attr_map, reloid_table_map, table_index_map, table_keyspace_map, indexoid_table_map, indexoid_name_map
 
 
-def process_plans(input_dir, indexoid_table_map, indexoid_name_map):
+def process_plans(input_dir, table_attr_map, indexoid_table_map, indexoid_name_map):
     # Process all the plans to get the query text.
     pg_qss_plans = pd.read_csv(f"{input_dir}/pg_qss_plans.csv")
     pg_qss_plans["query_text"] = ""
@@ -136,6 +135,17 @@ def process_plans(input_dir, indexoid_table_map, indexoid_name_map):
         orderbys = []
         if query_text is not None:
             root = pglast.Node(pglast.parse_sql(query_text))
+
+            # First construct all the table aliases.
+            alias_tbl_map = {}
+            for node in root.traverse():
+                if isinstance(node, pglast.node.Node):
+                    if isinstance(node.ast_node, pglast.ast.RangeVar):
+                        # Parse the alias map.
+                        if node.ast_node.alias is not None:
+                            alias_tbl_map[node.ast_node.alias.aliasname] = node.ast_node.relname
+                        alias_tbl_map[node.ast_node.relname] = node.ast_node.relname
+
             for node in root.traverse():
                 if isinstance(node, pglast.node.Node):
                     if isinstance(node.ast_node, pglast.ast.InsertStmt):
@@ -170,7 +180,8 @@ def process_plans(input_dir, indexoid_table_map, indexoid_name_map):
                             for n in node.ast_node.sortClause:
                                 sort = "DESC" if n.sortby_dir == pglast.enums.parsenodes.SortByDir.SORTBY_DESC else "ASC"
                                 if isinstance(n.node, pglast.ast.ColumnRef):
-                                    orderbys.append(f"{n.node.fields[0].val} {sort}")
+                                    tbl, col = extract_tbl_col_pair(alias_tbl_map, table_attr_map, n.node.fields)
+                                    orderbys.append(f"{tbl} {col} {sort}")
 
         for query in QUERY_CONTENT_BLOCK:
             if query_text is not None and query in query_text:
@@ -186,6 +197,31 @@ def process_plans(input_dir, indexoid_table_map, indexoid_name_map):
     for row in pg_qss_plans.itertuples():
         feature = json.loads(row.features)
         if row.query_text is not None:
+            def construct_plan_tuple(row, plan, target_idx_scan_table, target_idx_scan):
+                new_tuple = {
+                    'query_id': row.query_id,
+                    'generation': row.generation,
+                    'db_id': row.db_id,
+                    'pid': row.pid,
+                    'statement_timestamp': row.statement_timestamp,
+                    'plan_node_id': -1 if plan is None else plan["plan_node_id"],
+
+                    'left_child_node_id': plan["left_child_node_id"] if plan is not None and "left_child_node_id" in plan else -1,
+                    'right_child_node_id': plan["right_child_node_id"] if plan is not None and "right_child_node_id" in plan else -1,
+                    'total_cost': 0 if plan is None else plan["total_cost"],
+                    'startup_cost': 0 if plan is None else plan["startup_cost"],
+
+                    'query_text': row.query_text,
+                    'num_rel_refs': row.num_rel_refs,
+                    'target': row.target,
+                    'target_idx_scan_table': target_idx_scan_table,
+                    'target_idx_scan': target_idx_scan,
+                    'optype': row.optype,
+                    'limit': row.limit,
+                    'orderby': row.orderby,
+                }
+                new_df_tuples.append(new_tuple)
+
             # We have a valid plan.
             def process_plan(plan):
                 for key, value in plan.items():
@@ -202,59 +238,13 @@ def process_plans(input_dir, indexoid_table_map, indexoid_name_map):
                 if col in plan and plan[col] in indexoid_table_map:
                     target_idx_scan_table = indexoid_table_map[plan[col]]
                     target_idx_scan = indexoid_name_map[plan[col]]
-
-                new_tuple = {
-                    'query_id': row.query_id,
-                    'generation': row.generation,
-                    'db_id': row.db_id,
-                    'pid': row.pid,
-                    'statement_timestamp': row.statement_timestamp,
-                    'plan_node_id': plan["plan_node_id"],
-
-                    'left_child_node_id': plan["left_child_node_id"] if "left_child_node_id" in plan else -1,
-                    'right_child_node_id': plan["right_child_node_id"] if "right_child_node_id" in plan else -1,
-                    'total_cost': plan["total_cost"],
-                    'startup_cost': plan["startup_cost"],
-
-                    'query_text': row.query_text,
-                    'num_rel_refs': row.num_rel_refs,
-                    'target': row.target,
-                    'target_idx_scan_table': target_idx_scan_table,
-                    'target_idx_scan': target_idx_scan,
-                    'optype': row.optype,
-                    'limit': row.limit,
-                    'orderby': row.orderby,
-                }
-                new_df_tuples.append(new_tuple)
-
+                construct_plan_tuple(row, plan, target_idx_scan_table, target_idx_scan)
 
             # Let's append one for the -1. So we actually have something to match on to populate useful data.
-            new_df_tuples.append({
-                'query_id': row.query_id,
-                'generation': row.generation,
-                'db_id': row.db_id,
-                'pid': row.pid,
-                'statement_timestamp': row.statement_timestamp,
-                'plan_node_id': -1,
-
-                'left_child_node_id': -1,
-                'right_child_node_id': -1,
-                'total_cost': 0,
-                'startup_cost': 0,
-
-                'query_text': row.query_text,
-                'num_rel_refs': row.num_rel_refs,
-                'target': row.target,
-                'target_idx_scan': None,
-                'target_idx_insert': None,
-                'optype': row.optype,
-                'limit': row.limit,
-                'orderby': row.orderby,
-            })
+            construct_plan_tuple(row, None, None, None)
 
             # Generate the plan tuples.
             process_plan(json.loads(row.features)[0])
-
 
     new_df_tuples = pd.DataFrame(new_df_tuples)
     new_df_tuples.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
@@ -262,21 +252,58 @@ def process_plans(input_dir, indexoid_table_map, indexoid_name_map):
     return new_df_tuples
 
 
-def process_query_templates(pg_qss_plans):
+def extract_tbl_col_pair(alias_tbl_map, table_attr_map, columnref):
+    tbl = None
+    val = None
+    if len(columnref) == 2:
+        alias = columnref[0].val
+        if alias in alias_tbl_map:
+            tbl = alias_tbl_map[alias]
+        val = columnref[1].val
+    else:
+        for t in alias_tbl_map:
+            if t in table_attr_map and columnref[0].val in table_attr_map[t]:
+                tbl = t
+                break
+        val = columnref[0].val
+    return tbl, val
+
+
+def process_query_templates(pg_qss_plans, table_attr_map):
     # Process each query and extract useful parameters w.r.t to INDEX keyspaces.
     query_template_map = {}
     for plan_group in pg_qss_plans.groupby(by=["query_text"]):
         query_template_map[plan_group[0]] = {}
         root = pglast.Node(pglast.parse_sql(plan_group[0]))
+
+        # First construct all the table aliases.
+        alias_tbl_map = {}
+        for node in root.traverse():
+            if isinstance(node, pglast.node.Node):
+                if isinstance(node.ast_node, pglast.ast.RangeVar):
+                    # Parse the alias map.
+                    if node.ast_node.alias is not None:
+                        alias_tbl_map[node.ast_node.alias.aliasname] = node.ast_node.relname
+                    alias_tbl_map[node.ast_node.relname] = node.ast_node.relname
+
         for node in root.traverse():
             if isinstance(node, pglast.node.Node):
                 if isinstance(node.ast_node, pglast.ast.InsertStmt):
-                    # Specific case of INSERT INTO [tbl] (cols) VALUES ()
                     values = node.ast_node.selectStmt.valuesLists[0]
-                    for i, target in enumerate(node.ast_node.cols):
-                        column = target.name
-                        param = values[i].number
-                        query_template_map[plan_group[0]][column] = f"arg{param}"
+                    tbl = [k for k in alias_tbl_map.keys()][0]
+                    if node.ast_node.cols is None:
+                        # Specific case of INSERT INTO [tbl] VALUES ()
+                        assert node.ast_node.relation.relname in table_attr_map
+                        for i, target in enumerate(table_attr_map[node.ast_node.relation.relname]):
+                            column = target
+                            param = values[i].number
+                            query_template_map[plan_group[0]][(tbl, column)] = (None, f"arg{param}")
+                    else:
+                        # Specific case of INSERT INTO [tbl] (cols) VALUES ()
+                        for i, target in enumerate(node.ast_node.cols):
+                            column = target.name
+                            param = values[i].number
+                            query_template_map[plan_group[0]][(tbl, column)] = (None, f"arg{param}")
                 elif isinstance(node.ast_node, pglast.ast.A_Expr):
                     # It can be of the form [column] [OP] [param]
                     # Or it can be of the form [param] [OP] [column]
@@ -284,70 +311,84 @@ def process_query_templates(pg_qss_plans):
                     param = None
                     ast = node.ast_node
                     if (isinstance(ast.lexpr, pglast.ast.ColumnRef) and isinstance(ast.rexpr, pglast.ast.ParamRef)):
-                        column = ast.lexpr.fields[0].val
+                        column = ast.lexpr.fields
                         param = ast.rexpr.number
                     elif (isinstance(ast.lexpr, pglast.ast.ParamRef) and isinstance(ast.rexpr, pglast.ast.ColumnRef)):
-                        column = ast.rexpr.fields[0].val
+                        column = ast.rexpr.fields
                         param = ast.lexpr.number
 
                     if column is not None:
+                        tbl, column = extract_tbl_col_pair(alias_tbl_map, table_attr_map, column)
                         operator = node.ast_node.name[0].val
                         # Range clause.
                         if operator == "<":
                             column = column + "_high"
                         elif operator == ">=":
-                            column = column + "_loweq"
+                            column = column + "_leq"
+                        elif operator == "<=":
+                            column = column + "_heq"
+                        elif operator == ">":
+                            column = column + "_low"
                         # This is an useful index column.
                         assert param is not None
-                        query_template_map[plan_group[0]][column] = f"arg{param}"
+                        query_template_map[plan_group[0]][(tbl, column)] = (None, f"arg{param}")
 
                     if (isinstance(ast.lexpr, pglast.ast.ColumnRef) and isinstance(ast.rexpr, pglast.ast.ColumnRef)):
-                        column = ast.lexpr.fields[0].val
-                        param = ast.rexpr.fields[0].val
+                        ltbl, lcol = extract_tbl_col_pair(alias_tbl_map, table_attr_map, ast.lexpr.fields)
+                        rtbl, rcol = extract_tbl_col_pair(alias_tbl_map, table_attr_map, ast.rexpr.fields)
+                        # We don't want to indiscriminately overwrite in the case of s.id = $1 and s.id = c.id.
                         # This is the case where there is [a] column = [b] column.
-                        query_template_map[plan_group[0]][param] = column
-                        query_template_map[plan_group[0]][column] = param
+                        if (ltbl, lcol) not in query_template_map[plan_group[0]]:
+                            query_template_map[plan_group[0]][(ltbl, lcol)] = (rtbl, rcol)
+                        if (rtbl, rcol) not in query_template_map[plan_group[0]]:
+                            query_template_map[plan_group[0]][(rtbl, rcol)] = (ltbl, lcol)
     return query_template_map
 
 
 def workload_analysis(connection, input_dir, tables):
     # Process the schemas.
-    table_attr_map, attr_table_map, reloid_table_map, table_index_map, table_keyspace_map, indexoid_table_map, indexoid_name_map = process_schemas(connection, input_dir, tables)
+    table_attr_map, reloid_table_map, table_index_map, table_keyspace_map, indexoid_table_map, indexoid_name_map = process_schemas(connection, input_dir, tables)
 
     # Process the plans.
-    pg_qss_plans = process_plans(input_dir, indexoid_table_map, indexoid_name_map)
+    pg_qss_plans = process_plans(input_dir, table_attr_map, indexoid_table_map, indexoid_name_map)
 
     # This processes a mapping from query template -> ($1 -> "...").
     # As such, we identify a map from argument key to argument value per query template.
-    query_template_map = process_query_templates(pg_qss_plans)
+    query_template_map = process_query_templates(pg_qss_plans, table_attr_map)
 
     # Adjust the query templates and the attribute list.
     query_templates = query_template_map.keys()
     for key in query_templates:
         query_keys = {}
-        for k, v in query_template_map[key].items():
-            orig_k = k
-            if k.endswith("_high"):
-                k = k[:-5]
-            elif k.endswith("_loweq"):
-                k = k[:-6]
+        for (ltbl, lkey), (rtbl, rkey) in query_template_map[key].items():
+            orig_k = lkey
+            if lkey.endswith("_high"):
+                lkey = lkey[:-5]
+            elif lkey.endswith("_leq"):
+                lkey = lkey[:-4]
+            elif lkey.endswith("_heq"):
+                lkey = lkey[:-4]
+            elif lkey.endswith("_low"):
+                lkey = lkey[:-4]
 
             # The column is used in an INDEX.
             # We might need this column to specify another query.
             # Or is used as a reference.
-            if any([k in table_index_map[t] for t in tables]) \
-            or any([k in query_template_map[q] and not query_template_map[q][k].startswith("arg") for q in query_template_map]) \
-            or any([v in query_template_map[q] for q in query_template_map]):
-                query_keys[orig_k] = v
+            if lkey in table_index_map[ltbl] \
+            or any([(ltbl, lkey) in query_template_map[q] and not query_template_map[q][(ltbl, lkey)][1].startswith("arg") for q in query_template_map]) \
+            or any([(rtbl, rkey) in query_template_map[q] for q in query_template_map]):
+                query_keys[(ltbl, orig_k)] = (rtbl, rkey)
         query_template_map[key] = query_keys
 
     for tbl in tables:
         old_attr_list = table_attr_map[tbl]
         new_attr_list = [a for a in old_attr_list
                            if any([a in table_index_map[t] for t in tables]) # Is the key part of any index
-                           or any([a in query_template_map[b] for b in query_template_map]) # Is attr in the query template map.
-                           or any([a + "_high" in query_template_map[b] for b in query_template_map]) # Is attr in the query template map.
-                           or any([a + "_loweq" in query_template_map[b] for b in query_template_map])] # Is attr in the query template map.
+                           or any([(tbl, a) in query_template_map[b] for b in query_template_map]) # Is attr in the query template map.
+                           or any([(tbl, a + "_high") in query_template_map[b] for b in query_template_map]) # Is attr in the query template map.
+                           or any([(tbl, a + "_leq") in query_template_map[b] for b in query_template_map]) # Is attr in the query template map.
+                           or any([(tbl, a + "_heq") in query_template_map[b] for b in query_template_map]) # Is attr in the query template map.
+                           or any([(tbl, a + "_low") in query_template_map[b] for b in query_template_map])] # Is attr in the query template map.
         table_attr_map[tbl] = new_attr_list
 
     query_table_map = {(p.query_text, p.query_id, p.optype != OpType.SELECT.value): p.target for p in pg_qss_plans.itertuples()}
@@ -355,7 +396,6 @@ def workload_analysis(connection, input_dir, tables):
 
     wa = WorkloadAnalysis()
     wa.table_attr_map = table_attr_map
-    wa.attr_table_map = attr_table_map
     wa.table_index_map = table_index_map
     wa.reloid_table_map = reloid_table_map
     wa.table_keyspace_map = table_keyspace_map

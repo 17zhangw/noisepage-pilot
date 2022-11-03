@@ -132,7 +132,6 @@ def load_raw_data(connection, workload_only, work_prefix, input_dir, plans_df, i
 
 def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_only, wa):
     table_attr_map = wa.table_attr_map
-    attr_table_map = wa.attr_table_map
     table_keyspace_map = wa.table_keyspace_map
     indexoid_table_map = wa.indexoid_table_map
     indexoid_name_map = wa.indexoid_name_map
@@ -153,12 +152,13 @@ def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_onl
 
     max_arg = 0
     for q, v in query_template_map.items():
-        for _, a in v.items():
+        for _, (_, a) in v.items():
             if a.startswith("arg") and int(a[3:]) > max_arg:
                 max_arg = int(a[3:])
 
     logger.info("Creating materialized view of the deconstructed arguments.")
     with connection.transaction():
+        # Construct the temporary arguments table in parallel.
         assert max_arg > 0
         query = f"CREATE UNLOGGED TABLE {work_prefix}_mw_queries_args_temp AS SELECT *, "
         query += ",".join([f"TRIM(TRIM(NULLIF(split_part(split_part(comment, ',', {i+1}), '=', 2), '')), '''') as arg{i+1}" for i in range(max_arg)])
@@ -166,6 +166,7 @@ def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_onl
         logger.info("Executing SQL: %s", query)
         connection.execute(query)
 
+        # Make the real table partitioned from the temporary table.
         query = f"CREATE UNLOGGED TABLE {work_prefix}_mw_queries_args (LIKE {work_prefix}_mw_queries_args_temp) PARTITION BY LIST (target)"
         connection.execute(query)
 
@@ -187,7 +188,8 @@ def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_onl
     logger.info("Finished loading queries in query order.")
 
 
-def analyze_workload(benchmark, input_dir, workload_only, psycopg2_conn, work_prefix, load_raw, load_data, load_exec_stats):
+def analyze_workload(benchmark, input_dir, workload_only, psycopg2_conn, work_prefix,
+                     load_raw, load_data, load_deltas, load_hits, load_exec_stats):
     assert psycopg2_conn is not None
     tables = BENCHDB_TO_TABLES[benchmark]
 
@@ -205,70 +207,32 @@ def analyze_workload(benchmark, input_dir, workload_only, psycopg2_conn, work_pr
             logger.info("Loading the initial data to be manipulated.")
             load_initial_data(logger, connection, work_prefix, input_dir, wa.table_attr_map, wa.table_keyspace_map)
 
+        if load_deltas:
             logger.info("Computing data change frames.")
             compute_data_change_frames(logger, connection, work_prefix, wa)
 
-        if load_exec_stats:
+        if load_hits:
+            # We need the raw plans to load the hits correctly.
             plans = pd.read_csv(f"{input_dir}/pg_qss_plans.csv")
             logger.info("Computing data access frames.")
             compute_underspecified(logger, connection, work_prefix, wa, plans)
 
+        if load_exec_stats:
             logger.info("Computing statistics features")
             build_table_exec(logger, connection, work_prefix, list(set(wa.query_table_map.values())))
 
 
 class AnalyzeWorkloadCLI(cli.Application):
-    benchmark = cli.SwitchAttr(
-        "--benchmark",
-        str,
-        mandatory=True,
-        help="Benchmark that should be analyzed.",
-    )
-
-    dir_workload_input = cli.SwitchAttr(
-        "--dir-workload-input",
-        str,
-        mandatory=True,
-        help="Path to the folder containing the workload input.",
-    )
-
-    workload_only = cli.SwitchAttr(
-        "--workload-only",
-        str,
-        help="Whether the input contains only the workload stream.",
-    )
-
-    psycopg2_conn = cli.SwitchAttr(
-        "--psycopg2-conn",
-        str,
-        mandatory=True,
-        help="Psycopg2 connection that should be used.",
-    )
-
-    work_prefix = cli.SwitchAttr(
-        "--work-prefix",
-        str,
-        mandatory=True,
-        help="Prefix to use for working with the database.",
-    )
-
-    load_raw = cli.Flag(
-        "--load-raw",
-        default=False,
-        help="Whether to load the raw data or not.",
-    )
-
-    load_data = cli.Flag(
-        "--load-initial-data",
-        default=False,
-        help="Whether to load the initial data or not.",
-    )
-
-    load_exec_stats = cli.Flag(
-        "--load-exec-stats",
-        default=False,
-        help="Whether to load exec stats or not.",
-    )
+    benchmark = cli.SwitchAttr("--benchmark", str, mandatory=True, help="Benchmark that should be analyzed.",)
+    dir_workload_input = cli.SwitchAttr("--dir-workload-input", str, mandatory=True, help="Path to the folder containing the workload input.",)
+    workload_only = cli.SwitchAttr("--workload-only", str, help="Whether the input contains only the workload stream.",)
+    psycopg2_conn = cli.SwitchAttr("--psycopg2-conn", str, mandatory=True, help="Psycopg2 connection that should be used.",)
+    work_prefix = cli.SwitchAttr("--work-prefix", str, mandatory=True, help="Prefix to use for working with the database.",)
+    load_raw = cli.Flag("--load-raw", default=False, help="Whether to load the raw data or not.",)
+    load_data = cli.Flag("--load-initial-data", default=False, help="Whether to load the initial data or not.",)
+    load_deltas = cli.Flag("--load-deltas", default=False, help="Whether to load the deltas or not.",)
+    load_hits = cli.Flag("--load-hits", default=False, help="Whether to load hits or not.",)
+    load_exec_stats = cli.Flag("--load-exec-stats", default=False, help="Whether to load exec stats or not.",)
 
     def main(self):
         b_parts = self.benchmark.split(",")
@@ -282,6 +246,8 @@ class AnalyzeWorkloadCLI(cli.Application):
                              self.work_prefix,
                              self.load_raw,
                              self.load_data,
+                             self.load_deltas,
+                             self.load_hits,
                              self.load_exec_stats)
 
 
