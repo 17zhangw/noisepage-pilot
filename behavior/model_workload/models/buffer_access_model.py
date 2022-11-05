@@ -115,16 +115,6 @@ class BufferAccessModel(nn.Module):
     def require_optimize():
         return True
 
-    def load_model(model_file):
-        model_obj = torch.load(f"{model_file}/best_model.pt")
-        model = BufferAccessModel(model_obj["model_args"], model_obj["num_outputs"])
-        model.load_state_dict(model_obj["best_model"])
-
-        parent_dir = Path(model_file).parent
-        model.relpages_scaler = joblib.load(f"{parent_dir}/relpages_scaler.gz")
-        model.reltuples_scaler = joblib.load(f"{parent_dir}/reltuples_scaler.gz")
-        return model
-
     def __init__(self, model_args, num_outputs):
         super(BufferAccessModel, self).__init__()
 
@@ -213,3 +203,52 @@ class BufferAccessModel(nn.Module):
 
         num_outputs = len(global_targets[0])
         return td, feat_names, target_names, num_outputs, None
+
+    def load_model(model_file):
+        model_obj = torch.load(f"{model_file}/best_model.pt")
+        model = BufferAccessModel(model_obj["model_args"], model_obj["num_outputs"])
+        model.model_args = model_obj["model_args"]
+        model.load_state_dict(model_obj["best_model"])
+
+        parent_dir = Path(model_file).parent
+        model.relpages_scaler = joblib.load(f"{parent_dir}/relpages_scaler.gz")
+        model.reltuples_scaler = joblib.load(f"{parent_dir}/reltuples_scaler.gz")
+        return model
+
+    def inference(self, window_slot, num_queries, sb_bytes, table_state, table_attr_map, keyspace_feat_space):
+        norm_relpages = self.relpages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_keys]).reshape(-1, 1))
+        norm_reltuples = self.reltuples_scaler.transform(np.array([table_state[t]["approx_tuple_count"] for t in tbl_keys]).reshape(-1, 1))
+
+        tbl_mapping = {t:i for i, t in enumerate(table_attr_map)}
+        global_blks_requested = 0
+        for _, table_state in table_state.items():
+            table_state["norm_relpages"] = norm_relpages[i][0]
+            table_state["norm_reltuples"] = norm_reltuples[i][0]
+            global_blks_requested += table_state["total_blks_requested"]
+
+        key_bias, key_dists, masks, all_bias, addt_feats = extract_infer_tables_keys_features(self.model_args,
+                window_slot,
+                global_blks_requested,
+                tbl_mapping,
+                table_attr_map,
+                tbl_state,
+                keyspace_feat_space)
+
+        global_feats.append([num_queries, sb_bytes / 1024 / 1024])
+        global_bias = [all_bias]
+        global_addt_feats = [addt_feats]
+        global_key_bias = [key_bias]
+        global_key_dists = [key_dists]
+        global_masks = [masks]
+
+        inputs = {
+            "global_feats": torch.tensor(np.array(global_feats, dtype=np.float32)),
+            "global_bias": torch.tensor(np.array(global_bias, dtype=np.float32)),
+            "global_addt_feats": torch.tensor(np.array(global_addt_feats, dtype=np.float32)),
+            "global_key_bias": torch.tensor(np.array(global_key_bias, dtype=np.float32)),
+            "global_key_dists": torch.tensor(np.array(global_key_dists, dtype=np.float32)),
+            "global_masks": torch.tensor(np.array(global_masks, dtype=np.float32)),
+        }
+
+        outputs = torch.clip(self(**inputs), 0, 1)
+        return outputs, tbl_mapping

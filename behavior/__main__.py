@@ -10,7 +10,6 @@ from behavior.datagen import pg_collector
 from behavior.model_ous import train
 from behavior.model_ous import extract_ous
 from behavior.model_ous import eval_ou
-from behavior.model_query import eval_query
 from behavior.model_query import plot
 from behavior.model_query import compare_plot
 
@@ -38,7 +37,6 @@ if __name__ == "__main__":
     BehaviorCLI.subcommand("workload_exec_feature_synthesis", exec_feature_synthesis.ExecFeatureSynthesisCLI)
     BehaviorCLI.subcommand("eval_query_workload", eval_query_workload.EvalQueryWorkloadCLI)
 
-    BehaviorCLI.subcommand("eval_query", eval_query.EvalQueryCLI)
     BehaviorCLI.subcommand("eval_query_plots", plot.EvalQueryPlotsCLI)
     BehaviorCLI.subcommand("eval_query_compare_plots", compare_plot.EvalQueryComparePlotsCLI)
 

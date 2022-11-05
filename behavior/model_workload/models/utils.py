@@ -59,3 +59,51 @@ def extract_train_tables_keys_features(add_nonnorm, tbl_map, tbl_mapping, keys, 
                 key_bias[tbl_mapping[t], (g_index-1)*hist_width:g_index*hist_width] = sl
 
     return key_bias, key_dists, masks, all_bias, addt_feats
+
+
+def extract_infer_tables_keys_features(model_args, window_slot, all_requested, tbl_mapping, table_attr_map, table_state, keyspace_feat_space):
+    key_bias = np.zeros((len(tbl_mapping), 4 * hist_width))
+    key_dists = np.zeros((len(tbl_mapping), MAX_KEYS, 4 * hist_width))
+    masks = np.zeros((len(tbl_mapping), MAX_KEYS, 1))
+    addt_feats = np.zeros((len(tbl_mapping), (4 if add_nonnorm else 2)))
+    all_bias = np.zeros((len(tbl_mapping), 1))
+
+    for tbl, state in table_state.items():
+        all_bias[tbl_mapping[tbl], 0] = state["total_blks_requested"] / all_requested
+
+        addt_feats[tbl_mapping[tbl], 0] = state["norm_relpages"]
+        addt_feats[tbl_mapping[tbl], 1] = state["norm_reltuples"]
+        if model_args.add_nonnorm:
+            addt_feats[tbl_mapping[tbl], 2] = state["num_pages"]
+            addt_feats[tbl_mapping[tbl], 3] = state["approx_tuple_count"]
+
+        if tbl in keyspace_feat_space:
+            window_df = keyspace_feat_space[tbl]
+            window_df = window_df[window_df.window_index == window_slot]
+            for g in d.groupby(by=["optype"]):
+                for ig in g[1].itertuples():
+                    j = None
+                    for j, kt in enumerate(table_attr_map[tbl]):
+                        # Find the correct attribute index to use for the data.
+                        if kt == ig.att_name:
+                            break
+                        assert j is not None, "There is a misalignment between what is considered a useful attribute by data pages and analysis."
+
+                        # This is because OpType is 1-indexed.
+                        key_dists[tbl_mapping[tbl], j, (OpType[g[0]].value - 1) * hist_width:(OpType[g[0]].value) * hist_width] = np.array([float(f) for f in ig.key_dist.split(",")])
+                        masks[tbl_mapping[tbl], j] = 1
+
+        total_access = state["total_tuples_touched"]
+        mods = [
+            (OpType.SELECT, "num_select_tuples"),
+            (OpType.INSERT, "num_insert_tuples"),
+            (OpType.UPDATE, "num_update_tuples"),
+            (OpType.DELETE, "num_delete_tupels"),
+        ]
+
+        for (optype, num_queries) in mods:
+            sl = key_bias[tbl_mapping[tbl], (g_index-1)*hist_width:g_index*hist_width]
+            sl += np.full(hist_width, state[num_queries] / total_access)
+            key_bias[tbl_mapping[t], (g_index-1)*hist_width:g_index*hist_width] = sl
+
+    return key_bias, key_dists, masks, all_bias, addt_feats

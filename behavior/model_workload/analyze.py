@@ -160,9 +160,16 @@ def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_onl
     with connection.transaction():
         # Construct the temporary arguments table in parallel.
         assert max_arg > 0
-        query = f"CREATE UNLOGGED TABLE {work_prefix}_mw_queries_args_temp AS SELECT *, "
-        query += ",".join([f"TRIM(TRIM(NULLIF(split_part(split_part(comment, ',', {i+1}), '=', 2), '')), '''') as arg{i+1}" for i in range(max_arg)])
-        query += f" FROM {work_prefix}_mw_queries WHERE plan_node_id = -1 ORDER BY query_order, plan_node_id"
+        query = """
+            CREATE UNLOGGED TABLE {work_prefix}_mw_queries_args_temp AS SELECT q.*, {trims}
+            FROM {work_prefix}_mw_queries q, LATERAL (
+                SELECT array_agg(i.arg) as args FROM (
+                    SELECT (regexp_matches(comment, '(\$\w+) = (\''(?:[^\'']*(?:\''\'')?[^\'']*)*\'')', 'g'))[2] as arg
+                ) i
+            ) n
+            WHERE q.plan_node_id = -1 ORDER BY q.query_order, q.plan_node_id
+        """.format(work_prefix=work_prefix, trims=",".join([f"TRIM(n.args[{i+1}], '''') as arg{i+1}" for i in range(max_arg)]))
+
         logger.info("Executing SQL: %s", query)
         connection.execute(query)
 
@@ -172,8 +179,8 @@ def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_onl
 
         for target, _ in pg_qss_plans.groupby(by=["target"]):
             # Attempt to normalize the string out.
-            target = target.replace(",", "_")
-            connection.execute(f"CREATE UNLOGGED TABLE {work_prefix}_mw_queries_args_{target} PARTITION OF {work_prefix}_mw_queries_args FOR VALUES IN ('{target}') WITH (autovacuum_enabled = OFF)")
+            norm_target = target.replace(",", "_")
+            connection.execute(f"CREATE UNLOGGED TABLE {work_prefix}_mw_queries_args_{norm_target} PARTITION OF {work_prefix}_mw_queries_args FOR VALUES IN ('{target}') WITH (autovacuum_enabled = OFF)")
         connection.execute(f"CREATE UNLOGGED TABLE {work_prefix}_mw_queries_args_default PARTITION OF {work_prefix}_mw_queries_args DEFAULT WITH (autovacuum_enabled = OFF)")
         connection.execute(f"INSERT INTO {work_prefix}_mw_queries_args SELECT * FROM {work_prefix}_mw_queries_args_temp")
         connection.execute(f"DROP TABLE {work_prefix}_mw_queries_args_temp")
@@ -239,6 +246,11 @@ class AnalyzeWorkloadCLI(cli.Application):
         input_parts = self.dir_workload_input.split(",")
         for i in range(len(input_parts)):
             logger.info("Processing %s (%s, %s)", input_parts[i], b_parts[i], self.workload_only)
+
+            file_handler = logging.FileHandler(Path(input_parts[i]) / "output.log", mode="a")
+            file_handler.propagate = False
+            logger.addHandler(file_handler)
+
             analyze_workload(b_parts[i],
                              Path(input_parts[i]),
                              (self.workload_only == "True"),
@@ -249,6 +261,8 @@ class AnalyzeWorkloadCLI(cli.Application):
                              self.load_deltas,
                              self.load_hits,
                              self.load_exec_stats)
+
+            logger.removeHandler(file_handler)
 
 
 if __name__ == "__main__":

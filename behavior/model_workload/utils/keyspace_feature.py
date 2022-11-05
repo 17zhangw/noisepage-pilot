@@ -32,6 +32,10 @@ TABLE_EXEC_FEATURES = [
 # of a first/any aggregate. In reality, the numbers computed are static across the window
 # because of the inner query. So we can just take any value, as far as i know.
 # (famous last words)
+#
+# num_select_tuples is an awkward one. This is intuitively *every* tuple that is
+# touched regardless of what purpose it is for. For instance, if you update 100
+# tuples, num_select_tuples = 100 and num_modify_tuples = 100.
 TABLE_EXEC_FEATURES_QUERY = """
 	SELECT
 		s.query_order,
@@ -66,6 +70,7 @@ TABLE_EXEC_FEATURES_QUERY = """
 			    WHEN 'IndexScan' THEN b.counter0
 			    WHEN 'IndexOnlyScan' THEN b.counter0
 			    WHEN 'SeqScan' THEN b.counter0
+                            WHEN 'BitmapHeapScan' THEN b.counter1 + b.counter2
 			    ELSE 0 END) OVER w AS num_select_tuples,
 
 			SUM(CASE b.comment
@@ -81,6 +86,7 @@ TABLE_EXEC_FEATURES_QUERY = """
 			    WHEN 'IndexScan' THEN b.counter3
 			    WHEN 'IndexOnlyScan' THEN b.counter3
 			    WHEN 'SeqScan' THEN b.counter1
+                            WHEN 'BitmapHeapScan' THEN b.counter4
 			    ELSE 0 END) OVER w AS num_defrag
 
         FROM {work_prefix}_mw_queries_args a
@@ -420,9 +426,9 @@ def construct_query_window_stats(logger, connection, work_prefix, tbls, window_i
     ]
 
     ops = [
-        ("num_insert", OpType.INSERT.value),
-        ("num_update", OpType.UPDATE.value),
-        ("num_delete", OpType.DELETE.value),
+        ("num_insert_tuples", OpType.INSERT.value),
+        ("num_update_tuples", OpType.UPDATE.value),
+        ("num_delete_tuples", OpType.DELETE.value),
     ]
 
     qs = [

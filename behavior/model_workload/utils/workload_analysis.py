@@ -374,9 +374,10 @@ def workload_analysis(connection, input_dir, tables):
             # The column is used in an INDEX.
             # We might need this column to specify another query.
             # Or is used as a reference.
-            if lkey in table_index_map[ltbl] \
-            or any([(ltbl, lkey) in query_template_map[q] and not query_template_map[q][(ltbl, lkey)][1].startswith("arg") for q in query_template_map]) \
-            or any([(rtbl, rkey) in query_template_map[q] for q in query_template_map]):
+            index_use = lkey in table_index_map[ltbl]
+            ref_arg = any([(ltbl, lkey) in query_template_map[q] and not query_template_map[q][(ltbl, lkey)][1].startswith("arg") for q in query_template_map])
+            ref_key = any([(rtbl, rkey) in query_template_map[q] for q in query_template_map])
+            if index_use or ref_arg or ref_key:
                 query_keys[(ltbl, orig_k)] = (rtbl, rkey)
         query_template_map[key] = query_keys
 

@@ -67,9 +67,7 @@ SELECT
               WHEN 'ModifyTableInsert' THEN 1
               WHEN 'ModifyTableUpdate' THEN counter8
               WHEN 'ModifyTableDelete' THEN counter5
-              WHEN 'TupleARInsertTriggers' THEN counter0
-              WHEN 'TupleARUpdateTriggers' THEN counter0
-              WHEN 'TupleARDeleteTriggers' THEN counter0
+              WHEN 'BitmapHeapScan' THEN counter1 + counter2
               END) as total_tuples_touched,
     width_bucket(query_order, array[{values}]) as window_bucket
 FROM {work_prefix}_mw_queries
@@ -80,9 +78,7 @@ WHERE comment IN (
     'ModifyTableInsert',
     'ModifyTableUpdate',
     'ModifyTableDelete',
-    'TupleARInsertTriggers',
-    'TupleARUpdateTriggers',
-    'TupleARDeleteTriggers'
+    'BitmapHeapScan'
 )
 GROUP BY COALESCE(target_idx_scan_table, target), comment, window_bucket) s,
 
@@ -546,6 +542,10 @@ class ExecFeatureSynthesisCLI(cli.Application):
         input_parts = self.dir_workload_input.split(",")
         for i in range(len(input_parts)):
             logger.info("Processing %s (%s)", input_parts[i], self.workload_only)
+            file_handler = logging.FileHandler(Path(input_parts[i]) / "output.log", mode="a")
+            file_handler.propagate = False
+            logger.addHandler(file_handler)
+
             collect_inputs(Path(input_parts[i]),
                            (self.workload_only == "True"),
                            self.psycopg2_conn,
@@ -557,6 +557,8 @@ class ExecFeatureSynthesisCLI(cli.Application):
                            self.gen_exec_features,
                            self.gen_data_page_features,
                            self.gen_concurrency_features)
+
+            logger.removeHandler(file_handler)
 
 
 if __name__ == "__main__":

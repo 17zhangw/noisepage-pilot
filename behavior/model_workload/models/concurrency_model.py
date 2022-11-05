@@ -226,3 +226,91 @@ class ConcurrencyModel(nn.Module):
 
         num_outputs = len(global_targets[0])
         return td, feat_names, target_names, num_outputs, classes
+
+    def inference(self, window_slot, mpi, queries, table_state, table_attr_map, keyspace_feat_space):
+        norm_relpages = self.relpages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_keys]).reshape(-1, 1))
+        norm_reltuples = self.reltuples_scaler.transform(np.array([table_state[t]["approx_tuple_count"] for t in tbl_keys]).reshape(-1, 1))
+
+        tbl_mapping = {t:i for i, t in enumerate(table_attr_map)}
+        for _, table_state in table_state.items():
+            table_state["norm_relpages"] = norm_relpages[i][0]
+            table_state["norm_reltuples"] = norm_reltuples[i][0]
+
+        # FIXME(CONCURRENCY_SPACE): This is currently hardcoded.
+        ranges = [(0, 64), (1, 1024), (2, None)]
+        for i, (step, limit) in enumerate(ranges):
+            if limit is not None:
+                subqueries = queries[queries.pred_elapsed_us < limit]
+            else:
+                subqueries = queries[queries.pred_elapsed_us > ranges[i-1][1]]
+
+            global_blks_requested = 0
+            for _, table_state in table_state.items():
+                table_state["norm_relpages"] = norm_relpages[i][0]
+                table_state["num_select_tuples"] = 0
+                table_state["num_insert_tuples"] = 0
+                table_state["num_update_tuples"] = 0
+                table_state["num_delete_tuples"] = 0
+                table_state["total_tuples_touched"] = 0
+                table_state["total_blks_requested"] = 0
+
+            for tbls, df in subqueries.groupby(by=["target"]):
+                tbls = tbls.split(",")
+                for tbl in tbls:
+                    table_state[tbl]["num_select_tuples"] += np.sum(subqueries.optype == OpType.SELECT.value)
+                    table_state[tbl]["num_insert_tuples"] += np.sum(subqueries.optype == OpType.INSERT.value)
+                    table_state[tbl]["num_update_tuples"] += np.sum(subqueries.optype == OpType.UPDATE.value)
+                    table_state[tbl]["num_delete_tuples"] += np.sum(subqueries.optype == OpType.DELETE.value)
+                    table_state[tbl]["total_tuples_touched"] += subqueries.shape[0]
+
+                    blks = subqueries.total_blks_requested.sum()
+                    table_state["total_blks_requested"] += blks
+                    global_blks_requested += blks
+
+            key_bias, key_dists, masks, all_bias, addt_feats = extract_infer_tables_keys_features(self.model_args,
+                    window_slot,
+                    global_blks_requested,
+                    tbl_mapping,
+                    table_attr_map,
+                    tbl_state,
+                    keyspace_feat_space)
+
+            global_feats.append([subqueries.shape[0], mpi, step])
+            global_bias.append(all_bias)
+            global_addt_feats.append(addt_feats)
+            global_key_bias.append(key_bias)
+            global_key_dists.append(key_dists)
+            global_masks.append(masks)
+
+        inputs = {
+            "global_feats": torch.tensor(np.array(global_feats, dtype=np.float32)),
+            "global_bias": torch.tensor(np.array(global_bias, dtype=np.float32)),
+            "global_addt_feats": torch.tensor(np.array(global_addt_feats, dtype=np.float32)),
+            "global_key_bias": torch.tensor(np.array(global_key_bias, dtype=np.float32)),
+            "global_key_dists": torch.tensor(np.array(global_key_dists, dtype=np.float32)),
+            "global_masks": torch.tensor(np.array(global_masks, dtype=np.float32)),
+        }
+
+        outputs = torch.clip(self(**inputs), 0, 1)
+        return outputs
+
+    def bias(self, histograms, queries):
+        ranges = [(0, 64), (1, 1024), (2, None)]
+        queries["pred_elapsed_us_bias"] = queries["pred_elapsed_us"]
+        for i, (step, limit) in enumerate(ranges):
+            if limit is not None:
+                subqueries = queries[queries.pred_elapsed_us < limit]
+            else:
+                subqueries = queries[queries.pred_elapsed_us > ranges[i-1][1]]
+
+            if subqueries.shape[0] == 0:
+                continue
+
+            hist = histograms[step]
+            hist = np.cumsum(hist)
+            rands = np.random.uniform(0, 1, size=(subqueries.shape[0], 1))
+            bins = np.argmax(rands < hist, axis=1)
+            bias = (1 << bins)
+            assert bias.shape[0] == subqueries.shape[0]
+            queries.at[subqueries.index, "pred_elapsed_us_bias"] = queries.at[subqueries.index, "pred_elapsed_us_bias"] + bias
+        return queries

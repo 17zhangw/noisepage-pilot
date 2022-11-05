@@ -232,6 +232,7 @@ EXECUTION_FEATURES_MAP = {
     "BitmapHeapScan_num_empty_tuples": "counter1",
     "BitmapHeapScan_num_tuples_fetch": "counter2",
     "BitmapHeapScan_num_blocks_prefetch": "counter3",
+    "BitmapHeapScan_num_defrag": "counter4",
 
     "TupleARInsertTriggers_num_triggers": "counter0",
     "TupleARUpdateTriggers_num_triggers": "counter0",

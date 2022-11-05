@@ -51,7 +51,7 @@ def load_initial_data(logger, connection, work_prefix, input_dir, table_attr_map
 
             logger.info("Loading data %s (%s)", tbl, table_attr_map[tbl])
             assert (input_dir / f"{tbl}_snapshot.csv").exists()
-            input_frame = pd.read_csv(f"{input_dir}/{tbl}_snapshot.csv", usecols=table_attr_map[tbl])
+            input_frame = pd.read_csv(f"{input_dir}/{tbl}_snapshot.csv", usecols=table_attr_map[tbl], dtype=object)
             input_frame["insert_version"] = 0
             input_frame["delete_version"] = pd.NA
             input_frame["delete_version"] = input_frame.delete_version.astype("Int32")
@@ -68,13 +68,26 @@ def load_initial_data(logger, connection, work_prefix, input_dir, table_attr_map
                 if att.shape[0] > 0 and att.iloc[0].attlen == -1:
                     # This is a varying text field.
                     fields.append((col, 'text'))
-                elif pd_types.is_integer_dtype(input_frame.dtypes[col]):
+                    continue
+
+                try:
+                    # Unfortunately we have to try and convert since I don't want to parse the pg_attribute column.
+                    # And try to match a pgttypid.
+                    input_frame[col] = input_frame[col].astype(int)
                     fields.append((col, 'integer'))
-                elif pd_types.is_float_dtype(input_frame.dtypes[col]):
+                    continue
+                except:
+                    pass
+
+                try:
+                    input_frame[col] = input_frame[col].astype(float)
                     fields.append((col, 'float8'))
-                else:
-                    # This is a varying text field.
-                    fields.append((col, 'text'))
+                    continue
+                except:
+                    pass
+
+                # This is a varying text field.
+                fields.append((col, 'text'))
             sql += ",".join([f"{t[0]} {t[1]}" for t in fields])
             sql += ") WITH (autovacuum_enabled = OFF)"
             logger.info("Executing SQL: %s", sql)
@@ -106,7 +119,7 @@ def load_initial_data(logger, connection, work_prefix, input_dir, table_attr_map
             if tbl in table_attr_map:
                 for k in table_attr_map[tbl]:
                     # Build it on the single tuple too if needed.
-                    if tuple(k) not in installed_ks:
+                    if tuple([k]) not in installed_ks:
                         sql = f"CREATE INDEX {work_prefix}_{tbl}_{cnt} ON {work_prefix}_{tbl} ({k}, insert_version)"
                         logger.info("Executing SQL: %s", sql)
                         connection.execute(sql)
@@ -222,11 +235,25 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
             # We are not allowed to consider this argument.
             continue
 
+        # FIXME(TABLE/INDEX): This is actually pretty awkward. There is a small disconnect between the filters
+        # that are available and valid index predicates. In some cases, the "index" probe results in more
+        # tuples because the index itself is more restrictive --.
+        #
+        # Those cases, you'll have two different numbers: (1) how many the index fetches and (2) how many
+        # the scan outputs - which are the "hits" to the higher level.
+
         if not norm_lkey.startswith("arg") and not rkey.startswith("arg"):
             if rtbl in allowed_tbls:
                 assert not rkey.endswith("_high") and not rkey.endswith("_loweq")
                 predicates.append(f" {work_prefix}_{ltbl}.{norm_lkey} = {work_prefix}_{rtbl}.{rkey} ")
                 use_tbls.add(rtbl)
+            elif norm_lkey == lkey and rkey in table_attr_map[rtbl] and query_template_map[query][(rtbl, rkey)][1].startswith("arg"):
+                # This is the case where we have ltbl.lkey = rtbl.rkey AND rtbl.rkey = $1.
+                # FIXME(JOIN): This does seem like a hack because not all systems will do transitivity.
+                other_arg = query_template_map[query][(rtbl, rkey)][1]
+                ty = get_type(datatypes, work_prefix, ltbl, norm_lkey)
+                predicates.append(f" {work_prefix}_{ltbl}.{norm_lkey} = a.{other_arg}::{ty} ")
+                use_tbls.add(ltbl)
         elif lkey.endswith("_high") and rkey.startswith("arg"):
             assert rtbl is None
             ty = get_type(datatypes, work_prefix, ltbl, norm_lkey)
@@ -296,9 +323,10 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
         q += ",".join([f"{work_prefix}_{t}" for t in use_tbls]) + " WHERE "
 
         # Attach all the predicates that we care about.
-        q += " and ".join([f" {work_prefix}_{t}.insert_version <= a.query_order " for t in use_tbls]) + " and "
-        q += " and ".join([f" ({work_prefix}_{t}.delete_version is NULL or {work_prefix}_{t}.delete_version >= a.query_order) " for t in use_tbls]) + " and "
-        q += " and ".join(predicates)
+        q += " and ".join([f" {work_prefix}_{t}.insert_version <= a.query_order " for t in use_tbls])
+        q += " and " + " and ".join([f" ({work_prefix}_{t}.delete_version is NULL or {work_prefix}_{t}.delete_version >= a.query_order) " for t in use_tbls])
+        if len(predicates) > 0:
+            q += " and " + " and ".join(predicates)
 
         if lateral:
             # Attach the lateral sort.
@@ -315,7 +343,7 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
             q += f" and a.pid = {pid}"
 
     logger.info(q)
-    c = connection.execute(q)
+    c = connection.execute(q, prepare=False)
     logger.info("Finished executing with: %s", c.rowcount)
 
 
@@ -400,11 +428,12 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
                             process_plan(child[0], carry)
                             # Push the carried information forwards!
                             process_plan(child[1], carry)
-                        elif nt == OperatingUnit.IndexScan.name or nt == OperatingUnit.IndexOnlyScan.name or nt == OperatingUnit.SeqScan:
+                        elif nt in [OperatingUnit.IndexScan.name, OperatingUnit.IndexOnlyScan.name, OperatingUnit.SeqScan.name, OperatingUnit.BitmapIndexScan.name]:
                             key = {
                                 OperatingUnit.IndexScan.name: "IndexScan_scan_scanrelid_oid",
                                 OperatingUnit.IndexOnlyScan.name: "IndexOnlyScan_scan_scanrelid_oid",
                                 OperatingUnit.SeqScan.name: "SeqScan_scanrelid_oid",
+                                OperatingUnit.BitmapIndexScan.name: "BitmapIndexScan_scan_scanrelid_oid",
                             }[nt]
 
                             relname = reloid_table_map[f"{current_node[key]}"]

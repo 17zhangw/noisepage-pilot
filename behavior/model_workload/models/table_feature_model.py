@@ -20,7 +20,7 @@ from torch.utils.data import dataset
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from behavior.model_workload.models import construct_stack, MAX_KEYS
-from behavior.model_workload.utils import OpType
+from behavior.model_workload.utils import OpType, Map
 from sklearn.preprocessing import MinMaxScaler
 
 
@@ -52,6 +52,58 @@ MODEL_WORKLOAD_HIST_INPUTS = [
     "update",
     "delete",
 ]
+
+
+def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
+    hist_width = model_args.hist_width
+    # Construct the augmented inputs.
+    num_inputs = len(MODEL_WORKLOAD_NORMAL_INPUTS)
+    if model_args.add_nonnorm_features:
+        num_inputs += len(MODEL_WORKLOAD_NONNORM_INPUTS)
+    input_args = np.zeros(num_inputs)
+    input_args[0] = input_row.approx_free_percent / 100.0
+    input_args[1] = input_row.dead_tuple_percent / 100.0
+    input_args[2] = input_row.norm_num_pages
+    input_args[3] = input_row.norm_tuple_count
+    input_args[4] = input_row.norm_tuple_len_avg
+    input_args[5] = ff_value
+    if model_args.add_nonnorm_features:
+        input_args[6] = input_row.num_pages
+        input_args[7] = input_row.tuple_count
+        input_args[8] = input_row.tuple_len_avg
+
+    # Construct distribution scaler.
+    dist_scalers = np.zeros(5 * hist_width)
+    num_touch = input_row.num_select_tuples + input_row.num_modify_tuples
+    dist_scalers[0*hist_width:1*hist_width] = 1.0
+    dist_scalers[1*hist_width:2*hist_width] = 0.0 if num_touch == 0 else input_row.num_select_tuples / num_touch
+    dist_scalers[2*hist_width:3*hist_width] = 0.0 if num_touch == 0 else input_row.num_insert_tuples / num_touch
+    dist_scalers[3*hist_width:4*hist_width] = 0.0 if num_touch == 0 else input_row.num_update_tuples / num_touch
+    dist_scalers[4*hist_width:5*hist_width] = 0.0 if num_touch == 0 else input_row.num_delete_tuples / num_touch
+
+    # Construct key dists.
+    key_dists = np.zeros((MAX_KEYS, 5 * hist_width))
+    masks = np.zeros((MAX_KEYS, 1))
+    seen = []
+    if df is not None and "att_name" in df:
+        for ig in df.itertuples():
+            j = None
+            for j, kt in enumerate(tbl_attr_keys):
+                if kt == ig.att_name:
+                    break
+            assert j is not None, "There is a misalignment between what is considered a useful attribute by data pages and analysis."
+            assert (ig.optype, j) not in seen
+            seen.append((ig.optype, j))
+
+            if ig.optype == "data":
+                key_dists[j, 0:hist_width] = np.array([float(f) for f in ig.key_dist.split(",")])
+            elif ig.optype == "SELECT" or ig.optype == "INSERT" or ig.optype == "UPDATE" or ig.optype == "DELETE":
+                key_dists[j, (OpType[ig.optype].value) * hist_width:(OpType[ig.optype].value + 1) * hist_width] = np.array([float(f) for f in ig.key_dist.split(",")])
+            else:
+                key_dists[j, int(ig.optype) * hist_width:(int(ig.optype) + 1) * hist_width] = np.array([float(f) for f in ig.key_dist.split(",")])
+            masks[j] = 1
+    return input_args, dist_scalers, key_dists, masks
+
 
 def generate_dataset(logger, model_args):
     tbl_attr_keys = {}
@@ -85,7 +137,6 @@ def generate_dataset(logger, model_args):
     global_dists = []
     global_masks = []
     global_targets = []
-    hist_width = model_args.hist_width
     for d in model_args.input_dirs:
         input_files = glob.glob(f"{d}/exec_features/data/*.feather")
         pg_class = pd.read_csv(f"{d}/pg_class.csv")
@@ -121,62 +172,20 @@ def generate_dataset(logger, model_args):
 
             data.reset_index(drop=False, inplace=True)
             for wi, df in data.groupby(by=["window_index"]):
-                # Construct the augmented inputs.
-                num_inputs = len(MODEL_WORKLOAD_NORMAL_INPUTS)
-                if model_args.add_nonnorm_features:
-                    num_inputs += len(MODEL_WORKLOAD_NONNORM_INPUTS)
-                input_args = np.zeros(num_inputs)
-                input_args[0] = df.iloc[0].approx_free_percent / 100.0
-                input_args[1] = df.iloc[0].dead_tuple_percent / 100.0
-                input_args[2] = df.iloc[0].norm_num_pages
-                input_args[3] = df.iloc[0].norm_tuple_count
-                input_args[4] = df.iloc[0].norm_tuple_len_avg
-                input_args[5] = ff_value
-                if model_args.add_nonnorm_features:
-                    input_args[6] = df.iloc[0].num_pages
-                    input_args[7] = df.iloc[0].tuple_count
-                    input_args[8] = df.iloc[0].tuple_len_avg
+                input_args, dist_scalers, key_dists, masks = generate_point_input(model_args, df.iloc[0], df, tbl_attr_keys[root], ff_value)
                 global_args.append(input_args)
-
-                # Construct distribution scaler.
-                dist_scalers = np.zeros(5 * hist_width)
-                num_touch = df.iloc[0].num_select_tuples + df.iloc[0].num_modify_tuples
-                dist_scalers[0*hist_width:1*hist_width] = 1.0
-                dist_scalers[1*hist_width:2*hist_width] = 0.0 if num_touch == 0 else df.iloc[0].num_select_tuples / num_touch
-                dist_scalers[2*hist_width:3*hist_width] = 0.0 if num_touch == 0 else df.iloc[0].num_insert / num_touch
-                dist_scalers[3*hist_width:4*hist_width] = 0.0 if num_touch == 0 else df.iloc[0].num_update / num_touch
-                dist_scalers[4*hist_width:5*hist_width] = 0.0 if num_touch == 0 else df.iloc[0].num_delete / num_touch
                 global_dist_scalers.append(dist_scalers)
+                global_dists.append(key_dists)
+                global_masks.append(masks)
 
                 # Construct the targets.
                 targets = np.zeros(len(MODEL_WORKLOAD_TARGETS))
-                actual_insert = df.iloc[0].num_insert + df.iloc[0].num_update - df.iloc[0].num_hot
-                actual_touch = df.iloc[0].num_select_tuples + df.iloc[0].num_update + df.iloc[0].num_delete
+                actual_insert = df.iloc[0].num_insert_tuples + df.iloc[0].num_update_tuples - df.iloc[0].num_hot
+                actual_touch = df.iloc[0].num_select_tuples + df.iloc[0].num_update_tuples + df.iloc[0].num_delete_tuples
                 targets[0] = 0.0 if actual_insert == 0 else df.iloc[0].num_extend / actual_insert
                 targets[1] = 0.0 if actual_touch == 0 else df.iloc[0].num_defrag / actual_touch
                 targets[2] = 0.0 if df.iloc[0].num_update == 0 else df.iloc[0].num_hot / df.iloc[0].num_update
                 global_targets.append(targets)
-
-                key_dists = np.zeros((MAX_KEYS, 5 * hist_width))
-                masks = np.zeros((MAX_KEYS, 1))
-                seen = []
-                if "att_name" in df:
-                    for ig in df.itertuples():
-                        j = None
-                        for j, kt in enumerate(tbl_attr_keys[root]):
-                            if kt == ig.att_name:
-                                break
-                        assert j is not None, "There is a misalignment between what is considered a useful attribute by data pages and analysis."
-                        assert (ig.optype, j) not in seen
-                        seen.append((ig.optype, j))
-
-                        if ig.optype == "data":
-                            key_dists[j, 0:hist_width] = np.array([float(f) for f in ig.key_dist.split(",")])
-                        else:
-                            key_dists[j, (OpType[ig.optype].value) * hist_width:(OpType[ig.optype].value + 1) * hist_width] = np.array([float(f) for f in ig.key_dist.split(",")])
-                        masks[j] = 1
-                global_dists.append(key_dists)
-                global_masks.append(masks)
 
     with tempfile.NamedTemporaryFile("wb") as f:
         pickle.dump(global_args, f)
@@ -197,17 +206,6 @@ class TableFeatureModel(nn.Module):
 
     def require_optimize():
         return True
-
-    def load_model(model_file):
-        model_obj = torch.load(f"{model_file}/best_model.pt")
-        model = TableFeatureModel(model_obj["model_args"], model_obj["num_outputs"])
-        model.load_state_dict(model_obj["best_model"])
-
-        parent_dir = Path(model_file).parent
-        model.num_pages_scaler = joblib.load(f"{parent_dir}/num_pages_scaler.gz")
-        model.tuple_count_scaler = joblib.load(f"{parent_dir}/tuple_count_scaler.gz")
-        model.tuple_len_avg_scaler = joblib.load(f"{parent_dir}/tuple_len_avg_scaler.gz")
-        return model
 
     def __init__(self, model_args, num_outputs):
         super(TableFeatureModel, self).__init__()
@@ -277,3 +275,50 @@ class TableFeatureModel(nn.Module):
 
         num_outputs = len(global_targets[0])
         return td, feat_names, target_names, num_outputs, None
+
+    def load_model(model_file):
+        model_obj = torch.load(f"{model_file}/best_model.pt")
+        model = TableFeatureModel(model_obj["model_args"], model_obj["num_outputs"])
+        model.model_args = model_obj["model_args"]
+        model.load_state_dict(model_obj["best_model"])
+
+        parent_dir = Path(model_file).parent
+        model.num_pages_scaler = joblib.load(f"{parent_dir}/num_pages_scaler.gz")
+        model.tuple_count_scaler = joblib.load(f"{parent_dir}/tuple_count_scaler.gz")
+        model.tuple_len_avg_scaler = joblib.load(f"{parent_dir}/tuple_len_avg_scaler.gz")
+        return model
+
+    def inference(self, table_state, table_attr_map, keyspace_feat_space, window):
+        global_args = []
+        global_dist_scalers = []
+        global_dists = []
+        global_masks = []
+
+        tbl_keys = [t for t in table_state]
+        norm_num_pages = self.num_pages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_keys]).reshape(-1, 1))
+        norm_tuple_count = self.tuple_count_scaler.transform(np.array([table_state[t]["approx_tuple_count"] for t in tbl_keys]).reshape(-1, 1))
+        norm_tuple_len_avg = self.tuple_len_avg_scaler.transform(np.array([table_state[t]["tuple_len_avg"] for t in tbl_keys]).reshape(-1, 1))
+        for i, t in enumerate(tbl_keys):
+            table_state[t]["norm_num_pages"] = norm_num_pages[i][0]
+            table_state[t]["norm_tuple_count"] = norm_tuple_count[i][0]
+            table_state[t]["norm_tuple_len_avg"] = norm_tuple_len_avg[i][0]
+            df = None
+            if t in keyspace_feat_space:
+                df = keyspace_feat_space[t]
+                df = df[df.window_index == window]
+
+            input_args, dist_scalers, key_dists, masks = generate_point_input(self.model_args, Map(table_state[t]), df, table_attr_map[t], table_state[t]["target_ff"])
+            global_args.append(input_args)
+            global_dist_scalers.append(dist_scalers)
+            global_dists.append(key_dists)
+            global_masks.append(masks)
+
+        inputs = {
+            "global_args": torch.tensor(np.array(global_args, dtype=np.float32)),
+            "global_dist_scalers": torch.tensor(np.array(global_dist_scalers, dtype=np.float32)),
+            "global_dists": torch.tensor(np.array(global_dists, dtype=np.float32)),
+            "global_masks": torch.tensor(np.array(global_masks, dtype=np.float32)),
+        }
+
+        outputs = torch.clip(self(**inputs), 0, 1)
+        return outputs, tbl_keys

@@ -326,128 +326,32 @@ def task_behavior_eval_ou():
     }
 
 
-def task_behavior_eval_query():
-    """
-    Behavior modeling: perform query-level model analysis.
-    """
-    def eval_cmd(benchmark, session_sql, eval_raw_data, base_models, psycopg2_conn, num_iterations, predictive):
-        if base_models is None:
-            # Find the latest experiment by last modified timestamp.
-            experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
-            assert len(experiment_list) > 0, "No experiments found."
-            base_models = experiment_list[-1] / "gbm_l2"
-
-        assert benchmark in BENCHDB_TO_TABLES, "Unknwon benchmark specified."
-        assert eval_raw_data is not None, "No path to experiment data specified."
-        assert os.path.isdir(base_models), f"Specified path {base_models} is not a valid directory."
-        assert psycopg2_conn is not None, "No Psycopg2 connection string is specified."
-
-        eval_args = (
-            f"--benchmark {benchmark} "
-            f"--dir-data {eval_raw_data} "
-            f"--dir-base-models {base_models} "
-            f"--dir-evals-output {ARTIFACT_EVALS_QUERY} "
-            f"--psycopg2-conn \"{psycopg2_conn}\" "
-            f"--num-iterations {num_iterations} "
-            f"--predictive {predictive} "
-        )
-
-        if session_sql is not None:
-            eval_args = eval_args + f"--session-sql {session_sql} "
-
-        return f"python3 -m behavior eval_query {eval_args}"
-
-    return {
-        "actions": [f"mkdir -p {ARTIFACT_EVALS_QUERY}", CmdAction(eval_cmd, buffering=1)],
-        "targets": [ARTIFACT_EVALS_QUERY],
-        "verbosity": VERBOSITY_DEFAULT,
-        "uptodate": [False],
-        "params": [
-            {
-                "name": "benchmark",
-                "long": "benchmark",
-                "help": "Benchmark that is being evaluated.",
-                "default": None,
-            },
-            {
-                "name": "session_sql",
-                "long": "session_sql",
-                "help": "Path to a list of SQL statements that should be executed in the session prior to EXPLAIN.",
-                "default": None,
-            },
-            {
-                "name": "eval_raw_data",
-                "long": "eval_raw_data",
-                "help": "Path to root folder containing the RAW data for evaluation purposes.",
-                "default": None,
-            },
-            {
-                "name": "base_models",
-                "long": "base_models",
-                "help": "Path to folder containing models for the base case. Defaults to gbm_l2 of last trained models.",
-                "default": None,
-            },
-            {
-                "name": "psycopg2_conn",
-                "long": "psycopg2_conn",
-                "help": "psycopg2 connection string to connect to the valid database instance.",
-                "default": None,
-            },
-            {
-                "name": "num_iterations",
-                "long": "num_iterations",
-                "help": "Number of iterations to attempt to converge predictions.",
-                "default": 1,
-            },
-            {
-                "name": "predictive",
-                "long": "predictive",
-                "help": "Whether to perform predictive analysis.",
-                "default": True,
-            },
-        ],
-    }
-
-
 def task_behavior_eval_query_workload():
     """
     Behavior modeling: perform query-level model analysis using a workload model.
     """
-    def eval_cmd(session_sql, eval_raw_data, base_models, workload_model, psycopg2_conn, compute_frames, eval_batch_size, use_workload_table_estimate, scratch_space, output):
-        if base_models is None:
-            # Find the latest experiment by last modified timestamp.
-            experiment_list = sorted((exp_path for exp_path in ARTIFACT_MODELS.glob("*")), key=os.path.getmtime)
-            assert len(experiment_list) > 0, "No experiments found."
-            base_models = experiment_list[-1] / "gbm_l2"
-
-        assert eval_raw_data is not None, "No path to experiment data specified."
-        assert os.path.isdir(base_models), f"Specified path {base_models} is not a valid directory."
-        assert psycopg2_conn is not None, "No Psycopg2 connection string is specified."
-
-        if output is None:
-            eval_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            output = ARTIFACT_EVALS_QUERY_WORKLOAD / f"eval_{eval_timestamp}"
-
+    def eval_cmd(session_sql, input_dir, output_dir, ou_models,
+                 query_feature_granularity_queries, table_feature_model_path,
+                 buffer_page_model_path, buffer_access_model_path, concurrency_model_path,
+                 concurrency_granularity_sec, concurrency_mpi, workload_analysis_conn,
+                 target_db_conn, workload_analysis_prefix, histogram_width):
         eval_args = (
-            f"--dir-data {eval_raw_data} "
-            f"--dir-base-models {base_models} "
-            f"--dir-workload-model {workload_model} "
-            f"--dir-evals-output {output} "
-            f"--psycopg2-conn \"{psycopg2_conn}\" "
-            f"--eval-batch-size {eval_batch_size} "
+            f"--session-sql {session_sql} "
+            f"--input-dir {input_dir} "
+            f"--output-dir {output_dir} "
+            f"--ou-models {ou_models} "
+            f"--query-feature-granularity-queries {query_feature_granularity_queries} "
+            f"--table-feature-model-path {table_feature_model_path} "
+            f"--buffer-page-model-path {buffer_page_model_path} "
+            f"--buffer-access-model-path {buffer_access_model_path} "
+            f"--concurrency-model-path {concurrency_model_path} "
+            f"--concurrency-granularity-sec {concurrency_granularity_sec} "
+            f"--concurrency-mpi {concurrency_mpi} "
+            f"--workload-analysis-conn \"{workload_analysis_conn}\" "
+            f"--target-db-conn \"{target_db_conn}\" "
+            f"--workload-analysis-prefix {workload_analysis_prefix} "
+            f"--histogram-width {histogram_width} "
         )
-
-        if use_workload_table_estimate is not None:
-            eval_args += f"--use-workload-table-estimate "
-
-        if compute_frames is not None:
-            eval_args += f"--compute-frames {compute_frames} "
-
-        if session_sql is not None:
-            eval_args = eval_args + f"--session-sql {session_sql} "
-
-        if scratch_space is not None:
-            eval_args += f"--dir-scratch {scratch_space} "
 
         return f"python3 -m behavior eval_query_workload {eval_args}"
 
@@ -457,66 +361,21 @@ def task_behavior_eval_query_workload():
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
         "params": [
-            {
-                "name": "session_sql",
-                "long": "session_sql",
-                "help": "Path to a list of SQL statements that should be executed in the session prior to EXPLAIN.",
-                "default": None,
-            },
-            {
-                "name": "eval_raw_data",
-                "long": "eval_raw_data",
-                "help": "Path to root folder containing the RAW data for evaluation purposes.",
-                "default": None,
-            },
-            {
-                "name": "base_models",
-                "long": "base_models",
-                "help": "Path to folder containing models for the base case. Defaults to gbm_l2 of last trained models.",
-                "default": None,
-            },
-            {
-                "name": "workload_model",
-                "long": "workload_model",
-                "help": "Path to folder containing the workload model.",
-                "default": None,
-            },
-            {
-                "name": "psycopg2_conn",
-                "long": "psycopg2_conn",
-                "help": "psycopg2 connection string to connect to the valid database instance.",
-                "default": None,
-            },
-            {
-                "name": "compute_frames",
-                "long": "compute_frames",
-                "help": "Whether to compute frames on the fly.",
-                "default": None,
-            },
-            {
-                "name": "eval_batch_size",
-                "long": "eval_batch_size",
-                "help": "Size of OU files to batch evaluate.",
-                "default": 16,
-            },
-            {
-                "name": "use_workload_table_estimate",
-                "long": "use_workload_table_estimate",
-                "help": "Whether to use the workload model to estimate table statistics.",
-                "default": None,
-            },
-            {
-                "name": "scratch_space",
-                "long": "scratch_space",
-                "help": "Space to use for the temporary files.",
-                "default": None,
-            },
-            {
-                "name": "output",
-                "long": "output",
-                "help": "Path to the output directory that should be used.",
-                "default": None,
-            },
+            { "name": "session_sql", "long": "session_sql", "help": "Path to a list of SQL statements that should be executed in the session prior to EXPLAIN.", "default": None, },
+            { "name": "input_dir", "long": "input_dir", "help": "Input directory for data.", "default": None, },
+            { "name": "output_dir", "long": "output_dir", "help": "Output directory for evals.", "default": None, },
+            { "name": "ou_models", "long": "ou_models", "help": "Path to OU models.", "default": None, },
+            { "name": "query_feature_granularity_queries", "help": "Granularity of window slices in queries.", "default": 1000, },
+            { "name": "table_feature_model_path", "long": "table_feature_model_path", "help": "Path to Table Feature models.", "default": None, },
+            { "name": "buffer_page_model_path", "long": "buffer_page_model_path", "help": "Path to Buffer Page models.", "default": None, },
+            { "name": "buffer_access_model_path", "long": "buffer_acccess_model_path", "help": "Path to Buffer Access models.", "default": None, },
+            { "name": "concurrency_model_path", "long": "concurrency_model_path", "help": "Path to Concurrency models.", "default": None, },
+            { "name": "concurrency_granularity_sec", "long": "concurrency_granularity_sec", "help": "Concurrency granularity in seconds.", "default": 1 },
+            { "name": "concurrency_mpi", "long": "concurrency_mpi", "help": "Concurrency MPI.", "default": None, },
+            { "name": "workload_analysis_conn", "long": "workload_analysis_conn", "help": "psycopg2 connection string to connect to the workload database instance.", "default": None, },
+            { "name": "target_db_conn", "long": "target_db_conn", "help": "psycopg2 connection string to connect to the target database instance.", "default": None, },
+            { "name": "workload_analysis_prefix", "long": "workload_analysis_prefix", "help": "Workload analysis prefix to use.", "default": None, },
+            { "name": "histogram_width", "long": "histogram_width", "help": "Number of buckets (histogram width).", "default": None, },
         ],
     }
 

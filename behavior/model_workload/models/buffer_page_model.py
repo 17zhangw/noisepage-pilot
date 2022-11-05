@@ -59,3 +59,6 @@ class BufferPageModel():
         x = data[["comment", "reltuples", "relpages"]]
         y = data["asked_pages"]
         return (x, y)
+
+    def inference(self, input_frame):
+        return np.clip(self.automl.predict(input_frame), 0)
