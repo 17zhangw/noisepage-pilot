@@ -45,7 +45,6 @@ datagen:
       - qss_capture_nested = ON
       - qss_capture_exec_stats = ON
       - qss_output_format = noisepage
-      - qss_capture_abort = ON
 
     runs:
       # Options that describe each run. These arrays must have the same length.

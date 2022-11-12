@@ -273,6 +273,7 @@ for workload in "${workload_directory}"/*; do
                 ${psql} --dbname=benchbase --csv --command="SELECT EXTRACT(epoch from NOW()) as time, * FROM pg_stats s JOIN information_schema.columns c ON s.tablename=c.table_name AND s.attname=c.column_name WHERE s.schemaname = 'public';" > "${benchmark_output}/pg_stats.csv.${i}"
                 ${psql} --dbname=benchbase --csv --command="SELECT EXTRACT(epoch from NOW()) as time, * FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public';" > "${benchmark_output}/pg_class.csv.${i}"
                 ${psql} --dbname=benchbase --csv --command="SELECT EXTRACT(epoch from NOW()) as time, * FROM pg_attribute;" > "${benchmark_output}/pg_attribute.csv.${i}"
+                ${psql} --dbname=benchbase --csv --command="SELECT EXTRACT(epoch from NOW()) as time, * FROM pg_index;" > "${benchmark_output}/pg_index.csv.${i}"
             fi
 
             if [ "$enable_collector" != 'False' ];
@@ -280,12 +281,6 @@ for workload in "${workload_directory}"/*; do
                 # Initialize collector. We currently don't have a means by which to check whether
                 # collector has successfully attached to the instance. As such, we (wait) 10 seconds.
                 doit collector_init --benchmark="${benchmark}" --output_dir="${benchmark_output}" --wait_time=60 --collector_interval=$collector_interval --pid=$postmaster_pid
-            elif [ "$snapshot_metadata" == 'True' ];
-            then
-                # Copy metadata into collector files.
-                cp "{benchmark_output}/pg_stats.csv.${i}" "${benchmark_output}/pg_stats.csv"
-                cp "{benchmark_output}/pg_class.csv.${i}" "${benchmark_output}/pg_class.csv"
-                cp "{benchmark_output}/pg_attribute.csv.${i}" "${benchmark_output}/pg_attribute.csv"
             fi
 
             if [ ! -z "$pre_execute" ];
@@ -303,16 +298,9 @@ for workload in "${workload_directory}"/*; do
                 doit collector_shutdown --output_dir="${benchmark_output}"
             fi
 
-            if [ ${i} == $((${#benchbase_configs[@]} - 1)) ];
-            then
-                plans_file="${benchmark_output}/pg_qss_plans.csv"
-                stats_file="${benchmark_output}/pg_qss_stats.csv"
-                ddl_file="${benchmark_output}/pg_qss_ddl.csv"
-                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_plans;" > "${plans_file}"
-                ${psql} --dbname=benchbase --csv --command="SELECT * FROM pg_catalog.pg_qss_ddl;" > "${ddl_file}"
-                ${psql} --dbname=benchbase --csv --variable="FETCH_COUNT=131072" --command="SELECT * FROM pg_catalog.pg_qss_stats;" > /tmp/pg_qss_stats.csv
-                sort -t, -n -k5,5 -k6,6 /tmp/pg_qss_stats.csv -o "${stats_file}"
-            fi
+            # Move the relevant stats out to the benchmark output.
+            mkdir "${benchmark_output}/stats.${i}"
+            mv ${PGDATA_LOCATION}/pg_stat/*.csv "${benchmark_output}/stats.${i}/"
 
             if [ ! -z "$post_execute" ];
             then

@@ -209,46 +209,7 @@ def task_noisepage_qss_install():
     ]
 
     sql_list2 = [
-        "DROP TABLE IF EXISTS pg_catalog.pg_qss_plans",
-        "DROP TABLE IF EXISTS pg_catalog.pg_qss_stats",
         "DROP TABLE IF EXISTS pg_catalog.pg_qss_ddl",
-        """CREATE UNLOGGED TABLE pg_catalog.pg_qss_plans(
-            query_id bigint,
-            generation integer,
-            db_id integer,
-            pid integer,
-            statement_timestamp bigint,
-            features text,
-            primary key(query_id, generation, db_id, pid)
-            )
-            WITH (autovacuum_enabled = OFF)""",
-        """CREATE UNLOGGED TABLE pg_catalog.pg_qss_stats(
-            query_id bigint,
-            generation integer,
-            db_id integer,
-            pid integer,
-            statement_timestamp bigint,
-            plan_node_id int,
-            elapsed_us float8,
-            counter0 float8,
-            counter1 float8,
-            counter2 float8,
-            counter3 float8,
-            counter4 float8,
-            counter5 float8,
-            counter6 float8,
-            counter7 float8,
-            counter8 float8,
-            counter9 float8,
-            blk_hit integer,
-            blk_miss integer,
-            blk_dirty integer,
-            blk_write integer,
-            payload bigint,
-            txn bigint,
-            comment text
-            )
-            WITH (autovacuum_enabled = OFF)""",
         """CREATE UNLOGGED TABLE pg_catalog.pg_qss_ddl(
 	    db_id integer,
 	    statement_timestamp bigint,
