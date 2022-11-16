@@ -49,7 +49,7 @@ def evaluate_ou_model(model, output_dir, benchmark, eval_file=None, eval_df=None
     if eval_file is not None:
         # Load the input OU file that we want to evaluate.
         # Load the entire input in and do evaluation.
-        input_data = OUDataLoader(logger=None, ou_files=[eval_file], chunksize=None, train=False).get_next_data()
+        input_data = OUDataLoader(logger=None, separate_indkey_features=False, ou_files=[eval_file], chunksize=None, train=False).get_next_data()
     else:
         input_data = eval_df
         eval_file = Path(model.ou_name)

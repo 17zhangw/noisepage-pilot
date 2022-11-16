@@ -1,4 +1,5 @@
 # Responsible for loading the initial shapshot data and computing deltas.
+import os
 import json
 import pandas as pd
 from pandas.api import types as pd_types
@@ -34,10 +35,10 @@ def get_datatypes(connection):
     return datatypes
 
 
-def load_initial_data(logger, connection, work_prefix, input_dir, table_attr_map, table_keyspace_map):
+def load_initial_data(logger, connection, workload_only, work_prefix, input_dir, table_attr_map, table_keyspace_map):
     # Load the data.
-    pg_class = pd.read_csv(f"{input_dir}/pg_class.csv")
-    pg_attribute = pd.read_csv(f"{input_dir}/pg_attribute.csv")
+    pg_class = pd.read_csv(f"{input_dir}/pg_class.csv" if not workload_only else f"{input_dir}/pg_class.csv.0")
+    pg_attribute = pd.read_csv(f"{input_dir}/pg_attribute.csv" if not workload_only else f"{input_dir}/pg_attribute.csv.0")
 
     with connection.transaction():
         for tbl in table_attr_map.keys():
@@ -96,6 +97,7 @@ def load_initial_data(logger, connection, work_prefix, input_dir, table_attr_map
             sql = f"COPY {work_prefix}_{tbl} FROM '/tmp/{work_prefix}_{tbl}.csv' WITH (FORMAT csv, HEADER true, NULL '')"
             logger.info("Executing SQL: %s", sql)
             connection.execute(sql)
+            os.remove(f"/tmp/{work_prefix}_{tbl}.csv")
 
         # Now build the index that we will use later.
         # Build for all the keyspaces.

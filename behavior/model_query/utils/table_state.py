@@ -1,12 +1,19 @@
+import numpy as np
 import torch
 import re
+from math import floor
 from psycopg.rows import dict_row
 from behavior import OperatingUnit
 from behavior.model_workload.utils import OpType
 from behavior.model_workload.models.table_feature_model import MODEL_WORKLOAD_TARGETS
+from behavior.model_query.utils.query_ous import mutate_index_state_will_extend
 
 
 def initial_trigger_metadata(target_conn, ougc):
+    """
+    Get all the relevant trigger information from the target database.
+    This is all the information about the relevant table names and attributes.
+    """
     with target_conn.cursor(row_factory=dict_row) as cursor:
         result = cursor.execute("""
             SELECT t.oid as "pg_trigger_oid", t.tgfoid, c.contype, c.confrelid, c.confupdtype, c.confdeltype, c.conkey, c.confkey, c.conpfeqop
@@ -33,11 +40,15 @@ def initial_trigger_metadata(target_conn, ougc):
                     attname = atts[(trigger["confrelid"], attnum)]["attname"]
                     attnames.append(attname)
             trigger["attnames"] = attnames
-
     ougc.trigger_info_map = triggers
 
 
 def initial_table_feature_state(target_conn, ougc):
+    """
+    Compute the initial state information from the target database.
+    This is the state that we pass forward to the table features model.
+    And also warp into future states.
+    """
     table_feature_state = {}
     oid_table_map = {}
 
@@ -66,31 +77,16 @@ def initial_table_feature_state(target_conn, ougc):
                 "tuple_len_avg": result["approx_tuple_len"] / result["approx_tuple_count"],
                 "target_ff": ff,
             }
-
     ougc.table_feature_state = table_feature_state
     ougc.oid_table_map = oid_table_map
 
 
-def refresh_table_fillfactor(target_conn, ougc):
-    with target_conn.cursor(row_factory=dict_row) as cursor:
-        for tbl in ougc.tables:
-            if tbl not in ougc.table_feature_state:
-                continue
-
-            pgc_record = [r for r in cursor.execute(f"SELECT * FROM pg_class where relname = '{tbl}'", prepare=False)][0]
-
-            ff = 1.0
-            if pgc_record["reloptions"] is not None:
-                for record in pgc_record["reloptions"]:
-                    for key, value in re.findall(r'(\w+)=(\w*)', record):
-                        if key == "fillfactor":
-                            ff = float(value) / 100.0
-                            break
-
-            ougc.table_feature_state[tbl]["target_ff"] = ff
-
-
-def initial_index_feature_state(target_conn, ougc):
+def resolve_index_feature_state(target_conn, ougc):
+    """
+    Build information about all the indexes in the target database.
+    This rolls forward the prior state if it already exists, otherwise
+    constructs and installs the new state.
+    """
     new_index_feature_state = {}
     new_indexoid_table_map = {}
     new_table_indexoid_map = {}
@@ -111,7 +107,7 @@ def initial_index_feature_state(target_conn, ougc):
                     result = [r for r in cursor.execute(f"SELECT * FROM pgstattuple('{indname}')", prepare=False)][0]
                     new_index_feature_state[indexrelid] = {
                         "indexname": indname,
-                        "table_len": result["table_len"],
+                        "num_pages": result["table_len"] / 8192.0,
                         "approx_tuple_count": result["tuple_count"],
                         "tuple_len_avg": 0.0 if result["tuple_count"] == 0 else result["tuple_len"] / result["tuple_count"],
                         "num_inserts": 0,
@@ -123,31 +119,45 @@ def initial_index_feature_state(target_conn, ougc):
                     new_table_indexoid_map[tblname] = []
                 new_table_indexoid_map[tblname].append(indexrelid)
                 new_indexoid_table_map[indexrelid] = tblname
-
     ougc.index_feature_state = new_index_feature_state
     ougc.indexoid_table_map = new_indexoid_table_map
     ougc.table_indexoid_map = new_table_indexoid_map
 
 
-def compute_table_exec_features(ougc, query_plans, window):
-    for t in ougc.table_feature_state:
-        ougc.table_feature_state[t]["num_select_tuples"] = 0
-        ougc.table_feature_state[t]["num_insert_tuples"] = 0
-        ougc.table_feature_state[t]["num_update_tuples"] = 0
-        ougc.table_feature_state[t]["num_delete_tuples"] = 0
-        ougc.table_feature_state[t]["num_modify_tuples"] = 0
+def refresh_table_fillfactor(target_conn, ougc):
+    """
+    Get the new fill factor setting for all the tables.
+    """
+    with target_conn.cursor(row_factory=dict_row) as cursor:
+        for tbl in ougc.tables:
+            if tbl not in ougc.table_feature_state:
+                continue
 
-    for tbl, df in query_plans.groupby(by=["target"]):
-        tbls = tbl.split(",")
-        for tblc in tbls:
-            ougc.table_feature_state[tblc]["num_insert_tuples"] += df[df.optype == OpType.INSERT.value].shape[0]
-            if f"{tblc}_hits" in df:
-                ougc.table_feature_state[tblc]["num_select_tuples"] += df[f"{tblc}_hits"].sum()
-                ougc.table_feature_state[tblc]["num_update_tuples"] += df[df.optype == OpType.UPDATE.value][f"{tblc}_hits"].sum()
-                ougc.table_feature_state[tblc]["num_delete_tuples"] += df[df.optype == OpType.DELETE.value][f"{tblc}_hits"].sum()
+            pgc_record = [r for r in cursor.execute(f"SELECT * FROM pg_class where relname = '{tbl}'", prepare=False)][0]
 
-                ougc.table_feature_state[tblc]["num_modify_tuples"] += df[df.optype == OpType.UPDATE.value][f"{tblc}_hits"].sum()
-                ougc.table_feature_state[tblc]["num_modify_tuples"] += df[df.optype == OpType.DELETE.value][f"{tblc}_hits"].sum()
+            ff = 1.0
+            if pgc_record["reloptions"] is not None:
+                for record in pgc_record["reloptions"]:
+                    for key, value in re.findall(r'(\w+)=(\w*)', record):
+                        if key == "fillfactor":
+                            ff = float(value) / 100.0
+                            break
+
+            ougc.table_feature_state[tbl]["target_ff"] = ff
+
+
+def compute_table_exec_features(ougc, tbl_summaries, window):
+    """
+    Computes the table execution features.
+    """
+
+    for tbl_summary in tbl_summaries:
+        # update the table metadata with what happens in this window.
+        ougc.table_feature_state[tbl_summary["target"]]["num_select_tuples"] = tbl_summary["num_select_tuples"]
+        ougc.table_feature_state[tbl_summary["target"]]["num_insert_tuples"] = tbl_summary["num_insert_tuples"]
+        ougc.table_feature_state[tbl_summary["target"]]["num_update_tuples"] = tbl_summary["num_update_tuples"]
+        ougc.table_feature_state[tbl_summary["target"]]["num_delete_tuples"] = tbl_summary["num_delete_tuples"]
+        ougc.table_feature_state[tbl_summary["target"]]["num_modify_tuples"] = tbl_summary["num_modify_tuples"]
 
     if ougc.table_feature_model is None:
         for t in ougc.table_feature_state:
@@ -162,47 +172,37 @@ def compute_table_exec_features(ougc, query_plans, window):
                     ougc.table_feature_state[t][target] = outputs[i][out]
 
 
-def compute_next_window_state(ougc, query_ous):
+def compute_next_window_state(ougc):
+    # Make a copy of the dead tuples counts.
     prev_dead_tuples = {}
-    for tbl, tbl_state in ougc.table_feature_state:
+    for tbl, tbl_state in ougc.table_feature_state.items():
         prev_dead_tuples[tbl] = (tbl_state["dead_tuple_percent"] * tbl_state["num_pages"] * 8192.0) / tbl_state["tuple_len_avg"]
 
-    delete_counters = {t: 0 for t in ougc.table_feature_state}
-    update_counters = {t: 0 for t in ougc.table_feature_state}
-
-    for query_ou in query_ous:
-        if query_ou["node_type"] == OperatingUnit.ModifyTableInsert.name:
-            # Indicate we've inserted a tuple.
-            tbl = query_ou["ModifyTable_target_oid"]
-            ougc.table_feature_state[tbl]["approx_tuple_count"] += 1
-            ougc.table_feature_state[tbl]["num_pages"] += query_ou["ModifyTableInsert_num_extends"]
-        elif query_ou["node_type"] == OperatingUnit.ModifyTableDelete.name:
-            # Indicate we've deleted a tuple.
-            tbl = query_ou["ModifyTable_target_oid"]
-            ougc.table_feature_state[tbl]["approx_tuple_count"] -= query_ou["ModifyTableDelete_num_deletes"]
-            delete_counters[tbl] += query_ou["ModifyTableDelete_num_deletes"]
-        elif query_ou["node_type"] == OperatingUnit.ModifyTableUpdate.name:
-            tbl = query_ou["ModifyTable_target_oid"]
-            # Update doesn't incur a tuple count change because "delete 1, insert 1 mentality".
-            ougc.table_feature_state[tbl]["num_pages"] += query_ou["ModifyTableUpdate_num_extends"]
-            update_counters[tbl] += query_ou["ModifyTableUpdate_num_updates"]
-        elif query_ou["node_type"] == OperatingUnit.ModifyTableIndexInsert.name:
-            indexoid = query_ou["ModifyTableIndexInsert_indexid"]
-            ougc.index_feature_state[indexoid]["approx_tuple_count"] += 1
-            ougc.index_feature_state[indexoid]["num_pages"] += query_ou["ModifyTableIndexInsert_num_extends"]
-
-    # Cap it at 0.
-    for _, tbl_state in ougc.table_feature_state:
+    # These values are all computed in expectation.
+    for tbl, tbl_state in ougc.table_feature_state.items():
+        # Modify the estimated tuple count by # insert and # delete.
+        tbl_state["approx_tuple_count"] += tbl_state["num_insert_tuples"]
+        tbl_state["approx_tuple_count"] -= tbl_state["num_delete_tuples"]
         tbl_state["approx_tuple_count"] = max(0, tbl_state["approx_tuple_count"])
+
+        ins_update = tbl_state["num_update_tuples"] - floor(tbl_state["num_update_tuples"] * tbl_state["hot_percent"])
+        ins_insert = tbl_state["num_insert_tuples"]
+
+        tbl_state["num_pages"] += floor((ins_insert + ins_update) * tbl_state["extend_percent"])
+        for indexoid, relname in ougc.indexoid_table_map.items():
+            if relname == tbl:
+                idx_state = ougc.index_feature_state[indexoid]
+                for _ in range(ins_insert + ins_update):
+                    idx_state["approx_tuple_count"] += 1
+                    idx_state["num_pages"] += mutate_index_state_will_extend(idx_state)
 
     # FIXME(VACUUM): Without a VACUUM model or some analytical setup, we can't wipe the dead tuple percents out.
     # This generally forces into a state where dead rises and free shrinks...does it matter though?
-    #
     # FIXME(STATS): There is no intuition of how tuple_len_avg will change over time nor any sense of defrags.
-    for tbl, tbl_state in ougc.table_feature_state:
-        new_dead_tuples = pre_dead_tuples[tbl] + dead_counters[tbl] + update_counters[tbl]
+    for tbl, tbl_state in ougc.table_feature_state.items():
+        new_dead_tuples = prev_dead_tuples[tbl] + tbl_state["num_delete_tuples"] + tbl_state["num_update_tuples"]
         est_dead_tuple_percent = new_dead_tuples * tbl_state["tuple_len_avg"] / (tbl_state["num_pages"] * 8192.0)
         est_free_tuple_percent = max(0.0, min(1.0, 1 - (tbl_state["approx_tuple_count"] + new_dead_tuples) * tbl_state["tuple_len_avg"] / (tbl_state["num_pages"] * 8192.0)))
-        tbl_state["dead_tuple_percent"] = max(0.0, min(1.0, est_dead_tuple_percent))
-        tbl_state["approx_free_percent"] = est_free_tuple_percent
-
+        # Adjust these to be from 0-100%
+        tbl_state["dead_tuple_percent"] = max(0.0, min(1.0, est_dead_tuple_percent)) * 100.0
+        tbl_state["approx_free_percent"] = est_free_tuple_percent * 100.0

@@ -10,13 +10,19 @@ from torch.nn import MSELoss
 from torch.utils.data import dataset
 import torch.nn.functional as F
 from behavior.model_workload.models import construct_stack, MAX_KEYS
-from behavior.model_workload.models.utils import extract_train_tables_keys_features
+from behavior.model_workload.models.utils import extract_train_tables_keys_features, extract_infer_tables_keys_features
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 import shutil
 
+try:
+    from autogluon.tabular import TabularDataset, TabularPredictor
+    from behavior.model_workload.models.multilabel_predictor import MultilabelPredictor
+except:
+    pass
 
-def generate_dataset(logger, model_args):
+
+def generate_dataset(logger, model_args, automl=False):
     # Generate all the directories we want.
     sub_dirs = []
     for d in model_args.input_dirs:
@@ -49,8 +55,12 @@ def generate_dataset(logger, model_args):
         for p in glob.glob(f"{in_dir}/keys/*.feather"):
             tbl_map[Path(p).stem] = pd.read_feather(p)
 
-        data["norm_relpages"] = relpages_scaler.transform(data.relpages.values.reshape(-1, 1))
-        data["norm_reltuples"] = reltuples_scaler.transform(data.reltuples.values.reshape(-1, 1))
+        if automl:
+            data["norm_relpages"] = data.relpages
+            data["norm_reltuples"] = data.reltuples
+        else:
+            data["norm_relpages"] = relpages_scaler.transform(data.relpages.values.reshape(-1, 1))
+            data["norm_reltuples"] = reltuples_scaler.transform(data.reltuples.values.reshape(-1, 1))
 
         # Assume every query succeeds I guess...
         for window in data.groupby(by=["window_bucket"]):
@@ -92,17 +102,20 @@ def generate_dataset(logger, model_args):
     for d in sub_dirs:
         handle(d, relpages_scaler, reltuples_scaler)
 
-    (Path(model_args.dataset_path)).mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("wb") as f:
-        pickle.dump(global_feats, f)
-        pickle.dump(global_bias, f)
-        pickle.dump(global_targets, f)
-        pickle.dump(global_addt_feats, f)
-        pickle.dump(global_key_bias, f)
-        pickle.dump(global_key_dists, f)
-        pickle.dump(global_masks, f)
-        f.flush()
-        shutil.copy(f.name, f"{model_args.dataset_path}/dataset.pickle")
+    if not automl:
+        (Path(model_args.dataset_path)).mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("wb") as f:
+            pickle.dump(global_feats, f)
+            pickle.dump(global_bias, f)
+            pickle.dump(global_targets, f)
+            pickle.dump(global_addt_feats, f)
+            pickle.dump(global_key_bias, f)
+            pickle.dump(global_key_dists, f)
+            pickle.dump(global_masks, f)
+            f.flush()
+            shutil.copy(f.name, f"{model_args.dataset_path}/dataset.pickle")
+    else:
+        return global_feats, global_bias, global_targets, global_addt_feats, global_key_bias, global_key_dists, global_masks, tbl_mapping, keys
 
 
 class BufferAccessModel(nn.Module):
@@ -216,39 +229,170 @@ class BufferAccessModel(nn.Module):
         return model
 
     def inference(self, window_slot, num_queries, sb_bytes, table_state, table_attr_map, keyspace_feat_space):
-        norm_relpages = self.relpages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_keys]).reshape(-1, 1))
-        norm_reltuples = self.reltuples_scaler.transform(np.array([table_state[t]["approx_tuple_count"] for t in tbl_keys]).reshape(-1, 1))
-
         tbl_mapping = {t:i for i, t in enumerate(table_attr_map)}
+        norm_relpages = self.relpages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_mapping]).reshape(-1, 1))
+        norm_reltuples = self.reltuples_scaler.transform(np.array([table_state[t]["approx_tuple_count"] for t in tbl_mapping]).reshape(-1, 1))
+
         global_blks_requested = 0
-        for _, table_state in table_state.items():
-            table_state["norm_relpages"] = norm_relpages[i][0]
-            table_state["norm_reltuples"] = norm_reltuples[i][0]
-            global_blks_requested += table_state["total_blks_requested"]
+        for tbl, i in tbl_mapping.items():
+            table_state[tbl]["norm_relpages"] = norm_relpages[i][0]
+            table_state[tbl]["norm_reltuples"] = norm_reltuples[i][0]
+            global_blks_requested += table_state[tbl]["total_blks_requested"]
 
         key_bias, key_dists, masks, all_bias, addt_feats = extract_infer_tables_keys_features(self.model_args,
                 window_slot,
                 global_blks_requested,
                 tbl_mapping,
                 table_attr_map,
-                tbl_state,
+                table_state,
                 keyspace_feat_space)
 
-        global_feats.append([num_queries, sb_bytes / 1024 / 1024])
+        global_feats = [[num_queries, sb_bytes / 1024 / 1024]]
         global_bias = [all_bias]
         global_addt_feats = [addt_feats]
         global_key_bias = [key_bias]
         global_key_dists = [key_dists]
         global_masks = [masks]
 
-        inputs = {
-            "global_feats": torch.tensor(np.array(global_feats, dtype=np.float32)),
-            "global_bias": torch.tensor(np.array(global_bias, dtype=np.float32)),
-            "global_addt_feats": torch.tensor(np.array(global_addt_feats, dtype=np.float32)),
-            "global_key_bias": torch.tensor(np.array(global_key_bias, dtype=np.float32)),
-            "global_key_dists": torch.tensor(np.array(global_key_dists, dtype=np.float32)),
-            "global_masks": torch.tensor(np.array(global_masks, dtype=np.float32)),
-        }
+        with torch.no_grad():
+            inputs = {
+                "global_feats": torch.tensor(np.array(global_feats, dtype=np.float32)),
+                "global_bias": torch.tensor(np.array(global_bias, dtype=np.float32)),
+                "global_addt_feats": torch.tensor(np.array(global_addt_feats, dtype=np.float32)),
+                "global_key_bias": torch.tensor(np.array(global_key_bias, dtype=np.float32)),
+                "global_key_dists": torch.tensor(np.array(global_key_dists, dtype=np.float32)),
+                "global_masks": torch.tensor(np.array(global_masks, dtype=np.float32)),
+            }
 
-        outputs = torch.clip(self(**inputs), 0, 1)
+            predictions = self(**inputs)[0]
+            outputs = torch.clip(predictions, 0, 1)
+        return outputs, tbl_mapping
+
+
+class AutoMLBufferAccessModel():
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
+
+    def require_optimize():
+        return False
+
+    def __init__(self, model_args):
+        super(AutoMLBufferAccessModel, self).__init__()
+        self.model_args = model_args
+
+    def get_dataset(logger, model_args):
+        global_feats, global_bias, global_targets, global_addt_feats, global_key_bias, global_key_dists, global_masks, tbl_mapping, tbl_attr_keys = generate_dataset(logger, model_args, automl=True)
+
+        inputs = []
+        hist = model_args.hist_width
+        dist_range = [
+            ("dist_select", range(0, hist)),
+            ("dist_insert", range(hist, 2 * hist)),
+            ("dist_update", range(2 * hist, 3 * hist)),
+            ("dist_delete", range(3 * hist, 4 * hist))
+        ]
+        for i in range(len(global_feats)):
+            input_row = {
+                "num_queries": global_feats[i][0],
+                "sb_mb": global_feats[i][1],
+            }
+
+            for t, tidx in tbl_mapping.items():
+                input_row[f"target_{t}"] = global_targets[i][tidx]
+                input_row[f"{t}_bias"] = global_bias[i][tidx][0]
+                input_row[f"{t}_norm_relpages"] = global_addt_feats[i][tidx][0]
+                input_row[f"{t}_norm_reltuples"] = global_addt_feats[i][tidx][1]
+
+                for name, rg in dist_range:
+                    for j in rg:
+                        input_row[f"{t}_{name}_{j%hist}"] = global_key_bias[i][tidx][j]
+
+                keys = tbl_attr_keys[t]
+                for colidx, col in enumerate(keys):
+                    if global_masks[i][tidx][colidx] == 1:
+                        for name, rg in dist_range:
+                            for j in rg:
+                                # We have a valid array.
+                                input_row[f"{t}_{col}_{name}_{j%hist}"] = global_key_dists[i][tidx][colidx][j]
+            inputs.append(input_row)
+
+        inputs = pd.DataFrame(inputs)
+        return inputs
+
+
+    def load_model(model_file):
+        with open(f"{model_file}/args.pickle", "rb") as f:
+            model_args = pickle.load(f)
+
+        model = AutoMLBufferAccessModel(model_args)
+        model.predictor = MultilabelPredictor.load(model_file)
+        return model
+
+
+    def fit(self, dataset):
+        targets = [c for c in dataset if "target" in c]
+        num = len(targets)
+        model_file = self.model_args.output_path
+        predictor = MultilabelPredictor(labels=targets, problem_types=["regression"]*num, eval_metrics=["mean_squared_error"]*num, path=model_file)
+        predictor.fit(dataset, time_limit=self.model_args.automl_timeout_secs, presets="medium_quality")
+        with open(f"{self.model_args.output_path}/args.pickle", "wb") as f:
+            pickle.dump(self.model_args, f)
+
+
+    def inference(self, window_slot, num_queries, sb_bytes, table_state, table_attr_map, keyspace_feat_space):
+        tbl_mapping = {t:i for i, t in enumerate(table_attr_map)}
+        global_blks_requested = 0
+        for _, tbl_state in table_state.items():
+            tbl_state["norm_relpages"] = tbl_state["num_pages"]
+            tbl_state["norm_reltuples"] = tbl_state["approx_tuple_count"]
+            global_blks_requested += tbl_state["total_blks_requested"]
+
+        key_bias, key_dists, masks, all_bias, addt_feats = extract_infer_tables_keys_features(self.model_args,
+                window_slot,
+                global_blks_requested,
+                tbl_mapping,
+                table_attr_map,
+                table_state,
+                keyspace_feat_space)
+
+        hist = self.model_args.hist_width
+        dist_range = [
+            ("dist_select", range(0, hist)),
+            ("dist_insert", range(hist, 2 * hist)),
+            ("dist_update", range(2 * hist, 3 * hist)),
+            ("dist_delete", range(3 * hist, 4 * hist))
+        ]
+
+        input_row = {
+            "num_queries": num_queries,
+            "sb_mb": sb_bytes / 1024 / 1024,
+        }
+        for t, tidx in tbl_mapping.items():
+            input_row[f"{t}_bias"] = key_bias[tidx][0]
+            input_row[f"{t}_norm_relpages"] = addt_feats[tidx][0]
+            input_row[f"{t}_norm_reltuples"] = addt_feats[tidx][1]
+
+            for name, rg in dist_range:
+                for j in rg:
+                    input_row[f"{t}_{name}_{j%hist}"] = key_bias[tidx][j]
+
+            keys = table_attr_map[t]
+            for colidx, col in enumerate(keys):
+                if masks[tidx][colidx] == 1:
+                    for name, rg in dist_range:
+                        for j in rg:
+                            # We have a valid array.
+                            input_row[f"{t}_{col}_{name}_{j%hist}"] = key_dists[tidx][colidx][j]
+
+        inputs = pd.DataFrame([input_row])
+        predictions = self.predictor.predict(inputs)
+        outputs = np.zeros(len(tbl_mapping))
+        for t, idx in tbl_mapping.items():
+            outputs[idx] = predictions[f"target_{t}"].iloc[0]
+
+        # Clip outputs to be between 0 and 1.
+        outputs = np.clip(outputs, 0, 1)
         return outputs, tbl_mapping

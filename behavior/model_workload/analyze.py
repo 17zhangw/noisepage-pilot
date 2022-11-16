@@ -1,3 +1,4 @@
+import os
 import psycopg
 from tqdm import tqdm
 import pandas as pd
@@ -14,6 +15,7 @@ from behavior.model_workload.utils import keyspace_metadata_read, keyspace_metad
 from behavior.utils.process_pg_state_csvs import postgres_julian_to_unix
 from behavior.model_workload.utils.keyspace_feature import build_table_exec
 from behavior.model_workload.utils.data_cardest import compute_underspecified
+from behavior.model_workload.utils.eval_analysis import load_eval_windows
 from behavior.model_ous.extract_ous import construct_diff_sql
 
 
@@ -112,6 +114,7 @@ def load_raw_data(connection, workload_only, work_prefix, input_dir, plans_df, i
         create_stats_sql = f"CREATE UNLOGGED TABLE {work_prefix}_mw_raw (" + ",".join([f"{tup[0]} {tup[1]}" for tup in QSS_STATS_COLUMNS]) + ")"
         connection.execute(create_stats_sql)
         connection.execute(f"COPY {work_prefix}_mw_raw FROM '/tmp/{work_prefix}_stats.csv' WITH (FORMAT csv, HEADER true, NULL '')")
+    os.remove(f"/tmp/{work_prefix}_stats.csv")
 
     if workload_only:
         connection.execute(f"ALTER TABLE {work_prefix}_mw_raw RENAME TO {work_prefix}_mw_diff")
@@ -196,13 +199,13 @@ def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_onl
 
 
 def analyze_workload(benchmark, input_dir, workload_only, psycopg2_conn, work_prefix,
-                     load_raw, load_data, load_deltas, load_hits, load_exec_stats):
+                     load_raw, load_data, load_deltas, load_hits, load_exec_stats, load_windows):
     assert psycopg2_conn is not None
     tables = BENCHDB_TO_TABLES[benchmark]
 
     with psycopg.connect(psycopg2_conn, autocommit=True, prepare_threshold=None) as connection:
         if load_raw:
-            wa, pg_qss_plans = workload_analysis(connection, input_dir, tables)
+            wa, pg_qss_plans = workload_analysis(connection, input_dir, workload_only, tables)
             keyspace_metadata_output(input_dir, wa)
 
             # Analyze and populate the workload.
@@ -212,7 +215,7 @@ def analyze_workload(benchmark, input_dir, workload_only, psycopg2_conn, work_pr
 
         if load_data:
             logger.info("Loading the initial data to be manipulated.")
-            load_initial_data(logger, connection, work_prefix, input_dir, wa.table_attr_map, wa.table_keyspace_map)
+            load_initial_data(logger, connection, workload_only, work_prefix, input_dir, wa.table_attr_map, wa.table_keyspace_map)
 
         if load_deltas:
             logger.info("Computing data change frames.")
@@ -228,6 +231,16 @@ def analyze_workload(benchmark, input_dir, workload_only, psycopg2_conn, work_pr
             logger.info("Computing statistics features")
             build_table_exec(logger, connection, work_prefix, list(set(wa.query_table_map.values())))
 
+        if workload_only and load_windows:
+            logger.info("Loading windows for workload analysis.")
+            max_arg = 0
+            for q, v in wa.query_template_map.items():
+                for _, (_, a) in v.items():
+                    if a.startswith("arg") and int(a[3:]) > max_arg:
+                        max_arg = int(a[3:])
+            tbls = [t for t in wa.table_attr_map if len(wa.table_attr_map[t]) > 0]
+            load_eval_windows(logger, connection, work_prefix, max_arg, tbls, list(wa.query_table_map.values()))
+
 
 class AnalyzeWorkloadCLI(cli.Application):
     benchmark = cli.SwitchAttr("--benchmark", str, mandatory=True, help="Benchmark that should be analyzed.",)
@@ -240,6 +253,7 @@ class AnalyzeWorkloadCLI(cli.Application):
     load_deltas = cli.Flag("--load-deltas", default=False, help="Whether to load the deltas or not.",)
     load_hits = cli.Flag("--load-hits", default=False, help="Whether to load hits or not.",)
     load_exec_stats = cli.Flag("--load-exec-stats", default=False, help="Whether to load exec stats or not.",)
+    load_windows = cli.Flag("--load-windows", default=False, help="Whether to load windows or not.",)
 
     def main(self):
         b_parts = self.benchmark.split(",")
@@ -260,7 +274,8 @@ class AnalyzeWorkloadCLI(cli.Application):
                              self.load_data,
                              self.load_deltas,
                              self.load_hits,
-                             self.load_exec_stats)
+                             self.load_exec_stats,
+                             self.load_windows)
 
             logger.removeHandler(file_handler)
 

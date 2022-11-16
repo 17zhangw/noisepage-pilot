@@ -23,6 +23,12 @@ from behavior.model_workload.models import construct_stack, MAX_KEYS
 from behavior.model_workload.utils import OpType, Map
 from sklearn.preprocessing import MinMaxScaler
 
+try:
+    from autogluon.tabular import TabularDataset, TabularPredictor
+    from behavior.model_workload.models.multilabel_predictor import MultilabelPredictor
+except:
+    pass
+
 
 MODEL_WORKLOAD_TARGETS = [
     "extend_percent",
@@ -105,7 +111,7 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
     return input_args, dist_scalers, key_dists, masks
 
 
-def generate_dataset(logger, model_args):
+def generate_dataset(logger, model_args, automl=False):
     tbl_attr_keys = {}
     # Construct the table attr mappings.
     for d in model_args.input_dirs:
@@ -126,17 +132,19 @@ def generate_dataset(logger, model_args):
         data["tuple_len_avg"] = data.table_len / data.approx_tuple_count
         return MinMaxScaler().fit(data.num_pages.values.reshape(-1, 1)), MinMaxScaler().fit(data.approx_tuple_count.values.reshape(-1, 1)), MinMaxScaler().fit(data.tuple_len_avg.values.reshape(-1, 1))
 
-    (Path(model_args.dataset_path)).mkdir(parents=True, exist_ok=True)
-    num_pages_scaler, tuple_count_scaler, tuple_len_avg_scaler = produce_scaler()
-    joblib.dump(num_pages_scaler, f"{model_args.dataset_path}/num_pages_scaler.gz")
-    joblib.dump(tuple_count_scaler, f"{model_args.dataset_path}/tuple_count_scaler.gz")
-    joblib.dump(tuple_len_avg_scaler, f"{model_args.dataset_path}/tuple_len_avg_scaler.gz")
+    if not automl:
+        (Path(model_args.dataset_path)).mkdir(parents=True, exist_ok=True)
+        num_pages_scaler, tuple_count_scaler, tuple_len_avg_scaler = produce_scaler()
+        joblib.dump(num_pages_scaler, f"{model_args.dataset_path}/num_pages_scaler.gz")
+        joblib.dump(tuple_count_scaler, f"{model_args.dataset_path}/tuple_count_scaler.gz")
+        joblib.dump(tuple_len_avg_scaler, f"{model_args.dataset_path}/tuple_len_avg_scaler.gz")
 
     global_args = []
     global_dist_scalers = []
     global_dists = []
     global_masks = []
     global_targets = []
+    correlated_tbls = []
     for d in model_args.input_dirs:
         input_files = glob.glob(f"{d}/exec_features/data/*.feather")
         pg_class = pd.read_csv(f"{d}/pg_class.csv")
@@ -147,9 +155,14 @@ def generate_dataset(logger, model_args):
             windows = pd.read_feather(f"{d}/exec_features/windows/{root}.feather")
             windows["num_pages"] = windows.table_len / 8192.0
             windows["tuple_len_avg"] = windows.table_len / windows.approx_tuple_count
-            windows["norm_num_pages"] = num_pages_scaler.transform(windows.num_pages.values.reshape(-1, 1))
-            windows["norm_tuple_count"] = tuple_count_scaler.transform(windows.approx_tuple_count.values.reshape(-1, 1))
-            windows["norm_tuple_len_avg"] = tuple_len_avg_scaler.transform(windows.tuple_len_avg.values.reshape(-1, 1))
+            if not automl:
+                windows["norm_num_pages"] = num_pages_scaler.transform(windows.num_pages.values.reshape(-1, 1))
+                windows["norm_tuple_count"] = tuple_count_scaler.transform(windows.approx_tuple_count.values.reshape(-1, 1))
+                windows["norm_tuple_len_avg"] = tuple_len_avg_scaler.transform(windows.tuple_len_avg.values.reshape(-1, 1))
+            else:
+                windows["norm_num_pages"] = windows.num_pages
+                windows["norm_tuple_count"] = windows.approx_tuple_count
+                windows["norm_tuple_len_avg"] = windows.tuple_len_avg
 
             data.set_index(keys=["window_index"], inplace=True)
             windows.set_index(keys=["window_index"], inplace=True)
@@ -162,7 +175,7 @@ def generate_dataset(logger, model_args):
 
             relation = pg_class[pg_class.relname == root].iloc[0]
             ff_value = 1.0
-            if relation.reloptions is not None:
+            if relation.reloptions is not None and not isinstance(relation.reloptions, np.float):
                 reloptions = ast.literal_eval(relation.reloptions)
                 for opt in reloptions:
                     for key, value in re.findall(r'(\w+)=(\w*)', opt):
@@ -178,23 +191,26 @@ def generate_dataset(logger, model_args):
                 global_dists.append(key_dists)
                 global_masks.append(masks)
 
-                # Construct the targets.
+                # FIXME(TARGET): Assume all tuples have equal probability of triggering the event.
                 targets = np.zeros(len(MODEL_WORKLOAD_TARGETS))
                 actual_insert = df.iloc[0].num_insert_tuples + df.iloc[0].num_update_tuples - df.iloc[0].num_hot
-                actual_touch = df.iloc[0].num_select_tuples + df.iloc[0].num_update_tuples + df.iloc[0].num_delete_tuples
                 targets[0] = 0.0 if actual_insert == 0 else df.iloc[0].num_extend / actual_insert
-                targets[1] = 0.0 if actual_touch == 0 else df.iloc[0].num_defrag / actual_touch
-                targets[2] = 0.0 if df.iloc[0].num_update == 0 else df.iloc[0].num_hot / df.iloc[0].num_update
+                targets[1] = 0.0 if df.iloc[0].num_select_tuples == 0 else df.iloc[0].num_defrag / df.iloc[0].num_select_tuples
+                targets[2] = 0.0 if df.iloc[0].num_update_tuples == 0 else df.iloc[0].num_hot / df.iloc[0].num_update_tuples
                 global_targets.append(targets)
+                correlated_tbls.append(root)
 
-    with tempfile.NamedTemporaryFile("wb") as f:
-        pickle.dump(global_args, f)
-        pickle.dump(global_dist_scalers, f)
-        pickle.dump(global_dists, f)
-        pickle.dump(global_masks, f)
-        pickle.dump(global_targets, f)
-        f.flush()
-        shutil.copy(f.name, f"{model_args.dataset_path}/dataset.pickle")
+    if not automl:
+        with tempfile.NamedTemporaryFile("wb") as f:
+            pickle.dump(global_args, f)
+            pickle.dump(global_dist_scalers, f)
+            pickle.dump(global_dists, f)
+            pickle.dump(global_masks, f)
+            pickle.dump(global_targets, f)
+            f.flush()
+            shutil.copy(f.name, f"{model_args.dataset_path}/dataset.pickle")
+    else:
+        return global_args, global_dist_scalers, global_dists, global_masks, global_targets, tbl_attr_keys, correlated_tbls
 
 
 class TableFeatureModel(nn.Module):
@@ -320,5 +336,132 @@ class TableFeatureModel(nn.Module):
             "global_masks": torch.tensor(np.array(global_masks, dtype=np.float32)),
         }
 
-        outputs = torch.clip(self(**inputs), 0, 1)
+        with torch.no_grad():
+            outputs = torch.clip(self(**inputs), 0, 1)
+        return outputs, tbl_keys
+
+
+class AutoMLTableFeatureModel():
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
+
+    def require_optimize():
+        return False
+
+    def __init__(self, model_args):
+        super(AutoMLTableFeatureModel, self).__init__()
+        self.model_args = model_args
+
+
+    def get_dataset(logger, model_args):
+        global_args, global_dist_scalers, global_dists, global_masks, global_targets, tbl_attr_keys, correlated_tbls = generate_dataset(logger, model_args, automl=True)
+
+        inputs = []
+        hist = model_args.hist_width
+        for i in range(len(global_args)):
+            input_row = {
+                "approx_free_percent": global_args[i][0],
+                "dead_tuple_percent": global_args[i][1],
+                "norm_num_pages": global_args[i][2],
+                "norm_tuple_count": global_args[i][3],
+                "norm_tuple_len_avg": global_args[i][4],
+                "target_ff": global_args[i][5],
+                "extend_percent": global_targets[i][0],
+                "defrag_percent": global_targets[i][1],
+                "hot_percent": global_targets[i][2],
+            }
+
+            dist_range = [
+                ("dist_data", range(0, hist)),
+                ("dist_select", range(hist, 2 * hist)),
+                ("dist_insert", range(2 * hist, 3 * hist)),
+                ("dist_update", range(3 * hist, 4 * hist)),
+                ("dist_delete", range(4 * hist, 5 * hist))
+            ]
+            for name, rg in dist_range:
+                for j in rg:
+                    input_row[f"{name}_{j}"] = global_dist_scalers[i][j]
+
+            keys = tbl_attr_keys[correlated_tbls[i]]
+            for colidx, col in enumerate(keys):
+                if global_masks[i][colidx] == 1:
+                    for name, rg in dist_range:
+                        for j in rg:
+                            # We have a valid array.
+                            input_row[f"{correlated_tbls[i]}_{col}_{name}_{j % hist}"] = global_dists[i][colidx][j]
+            inputs.append(input_row)
+
+        inputs = pd.DataFrame(inputs)
+        return inputs
+
+
+    def load_model(model_file):
+        with open(f"{model_file}/args.pickle", "rb") as f:
+            model_args = pickle.load(f)
+
+        model = AutoMLTableFeatureModel(model_args)
+        model.predictor = MultilabelPredictor.load(model_file)
+        return model
+
+
+    def fit(self, dataset):
+        model_file = self.model_args.output_path
+        predictor = MultilabelPredictor(labels=MODEL_WORKLOAD_TARGETS, problem_types=["regression"]*3, eval_metrics=["mean_squared_error"]*3, path=model_file)
+        predictor.fit(dataset, time_limit=self.model_args.automl_timeout_secs, presets="medium_quality")
+        with open(f"{self.model_args.output_path}/args.pickle", "wb") as f:
+            pickle.dump(self.model_args, f)
+
+
+    def inference(self, table_state, table_attr_map, keyspace_feat_space, window):
+        inputs = []
+        tbl_keys = [t for t in table_state]
+        for i, t in enumerate(tbl_keys):
+            table_state[t]["norm_num_pages"] = table_state[t]["num_pages"]
+            table_state[t]["norm_tuple_count"] = table_state[t]["approx_tuple_count"]
+            table_state[t]["norm_tuple_len_avg"] = table_state[t]["tuple_len_avg"]
+            df = None
+            if t in keyspace_feat_space:
+                df = keyspace_feat_space[t]
+                df = df[df.window_index == window]
+
+            input_args, dist_scalers, key_dists, masks = generate_point_input(self.model_args, Map(table_state[t]), df, table_attr_map[t], table_state[t]["target_ff"])
+            input_row = {
+                "approx_free_percent": input_args[0],
+                "dead_tuple_percent": input_args[1],
+                "norm_num_pages": input_args[2],
+                "norm_tuple_count": input_args[3],
+                "norm_tuple_len_avg": input_args[4],
+                "target_ff": input_args[5],
+            }
+
+            hist = self.model_args.hist_width
+            dist_range = [
+                ("dist_data", range(0, hist)),
+                ("dist_select", range(hist, 2 * hist)),
+                ("dist_insert", range(2 * hist, 3 * hist)),
+                ("dist_update", range(3 * hist, 4 * hist)),
+                ("dist_delete", range(4 * hist, 5 * hist))
+            ]
+            for name, rg in dist_range:
+                for j in rg:
+                    input_row[f"{name}_{j}"] = dist_scalers[j]
+
+            for colidx, col in enumerate(table_attr_map[t]):
+                if masks[colidx] == 1:
+                    for name, rg in dist_range:
+                        for j in rg:
+                            # We have a valid array.
+                            input_row[f"{t}_{col}_{name}_{j%hist}"] = key_dists[colidx][j]
+            inputs.append(input_row)
+
+        inputs = pd.DataFrame(inputs)
+        predictions = np.clip(self.predictor.predict(inputs), 0, 1)
+        outputs = np.zeros((len(tbl_keys), len(MODEL_WORKLOAD_TARGETS)))
+        for i, _ in enumerate(tbl_keys):
+            for j, key in enumerate(MODEL_WORKLOAD_TARGETS):
+                outputs[i][j] = predictions[key].iloc[i]
+
         return outputs, tbl_keys

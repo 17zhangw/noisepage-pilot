@@ -25,7 +25,7 @@ def task_workload_analyze():
     """
     Workload Analysis: perform analysis of a workload and populate all data needed for further computation.
     """
-    def workload_analyze(benchmark, input_workload, workload_only, psycopg2_conn, work_prefix, load_raw, load_initial_data, load_deltas, load_hits, load_exec_stats):
+    def workload_analyze(benchmark, input_workload, workload_only, psycopg2_conn, work_prefix, load_raw, load_initial_data, load_deltas, load_hits, load_exec_stats, load_windows):
         assert input_workload is not None
         assert work_prefix is not None
         assert len(benchmark.split(",")) == len(input_workload.split(","))
@@ -58,6 +58,9 @@ def task_workload_analyze():
         if load_exec_stats is not None:
             eval_args += "--load-exec-stats "
 
+        if load_windows is not None:
+            eval_args += "--load-windows "
+
         if psycopg2_conn is not None:
             eval_args = eval_args + f"--psycopg2-conn \"{psycopg2_conn}\" "
 
@@ -78,6 +81,7 @@ def task_workload_analyze():
             { "name": "load_deltas", "long": "load_deltas", "help": "Load the deltas.", "default": None, },
             { "name": "load_hits", "long": "load_hits", "help": "Load the hit.", "default": None, },
             { "name": "load_exec_stats", "long": "load_exec_stats", "help": "Whether to load the execution statistics or not.", "default": None, },
+            { "name": "load_windows", "long": "load_windows", "help": "Whether to load the windows or not.", "default": None, },
         ],
     }
 
@@ -195,7 +199,8 @@ def task_workload_build_exec_model():
     Workload Model: train execution feature models.
     """
     def workload_build_exec_model(
-            model_name, input_dirs, output_dir, lr,
+            model_name, input_dirs, output_dir,
+            automl_timeout_secs, lr,
             epochs, batch_size, cuda, train_size, hidden,
             depth, sweep_dropout, add_nonnorm_features, num_iterations,
             num_cpus, max_threads, hist_width, patience, ckpt_interval,
@@ -203,19 +208,14 @@ def task_workload_build_exec_model():
         assert model_name is not None
         assert input_dirs is not None
         assert output_dir is not None
-        assert lr is not None and epochs is not None and batch_size is not None and hidden is not None and depth is not None
 
         for iw in input_dirs.split(","):
             assert Path(iw).exists(), f"{iw} is not valid path."
 
         eval_args = (
             f"--model-name {model_name} "
-            f"--lr {lr} "
-            f"--epochs {epochs} "
-            f"--batch-size {batch_size} "
+            f"--automl-timeout-secs {automl_timeout_secs} "
             f"--train-size {train_size} "
-            f"--hidden {hidden} "
-            f"--depth {depth} "
             f"--input-dirs {input_dirs} "
             f"--output-dir {output_dir} "
             f"--num-iterations {num_iterations} "
@@ -228,6 +228,16 @@ def task_workload_build_exec_model():
             f"--window-slices {window_slices} "
         )
 
+        if lr:
+            eval_args += f"--lr {lr} "
+        if epochs:
+            eval_args += f"--epochs {epochs} "
+        if batch_size:
+            eval_args += f"--batch-size {batch_size} "
+        if hidden:
+            eval_args += f"--hidden {hidden} "
+        if depth:
+            eval_args += f"--depth {depth} "
         if cuda:
             eval_args += "--cuda "
         if sweep_dropout:
@@ -245,6 +255,7 @@ def task_workload_build_exec_model():
             { "name": "model_name", "long": "model_name", "help": "Model Name from models to create.", "default": None, },
             { "name": "input_dirs", "long": "input_dirs", "help": "Path to multiple input directories.", "default": None, },
             { "name": "output_dir", "long": "output_dir", "help": "Path to the containing output model directory.", "default": None, },
+            { "name": "automl_timeout_secs", "long": "automl_timeout_secs", "help": "AutoML timeout in seconds.", "default": 3600, },
             { "name": "lr", "long": "lr", "help": "Learning rate to use for training.", "default": None, },
             { "name": "epochs", "long": "epochs", "help": "Epochs to use for training.", "default": None, },
             { "name": "batch_size", "long": "batch_size", "help": "Batch size to use for training.", "default": None, },

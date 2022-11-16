@@ -7,6 +7,7 @@ MAX_KEYS = 5
 
 MODEL_ARGS_KEYS = [
     "model_name",
+    "automl_timeout_secs",
     "lr",
     "num_epochs",
     "batch_size",
@@ -53,7 +54,13 @@ def construct_stack(input_size, hidden_size, output_size, dropout, depth, activa
     model = nn.Sequential(*modules)
     return model
 
+
 from behavior.model_workload.models.buffer_access_model import BufferAccessModel
 from behavior.model_workload.models.table_feature_model import TableFeatureModel
 from behavior.model_workload.models.concurrency_model import ConcurrencyModel
 from behavior.model_workload.models.buffer_page_model import BufferPageModel
+
+from behavior.model_workload.models.buffer_access_model import AutoMLBufferAccessModel
+from behavior.model_workload.models.table_feature_model import AutoMLTableFeatureModel
+from behavior.model_workload.models.concurrency_model import AutoMLConcurrencyModel
+from behavior.model_workload.models.buffer_page_model import AutoMLBufferPageModel

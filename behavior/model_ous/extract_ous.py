@@ -8,6 +8,7 @@ from tqdm import tqdm
 from datetime import datetime
 from sqlalchemy import create_engine
 from plumbum import cli
+import os
 
 from behavior import OperatingUnit
 from behavior import EXECUTION_FEATURES_MAP
@@ -252,6 +253,7 @@ def load_initial_data(connection, data_folder, work_prefix, plans_df):
         connection.execute(f"COPY {work_prefix}_raw FROM '/tmp/{work_prefix}_stats.csv' WITH (FORMAT csv, HEADER true)")
         connection.execute(f"CREATE INDEX {work_prefix}_raw_0 ON {work_prefix}_raw (query_id, db_id, pid, statement_timestamp)")
         connection.execute(f"CREATE UNIQUE INDEX {work_prefix}_raw_1 ON {work_prefix}_raw (query_id, db_id, pid, statement_timestamp, plan_node_id) WHERE plan_node_id >= 0")
+    os.remove(f"/tmp/{work_prefix}_stats.csv")
 
 
 def load_filter(connection, work_prefix, valid_queries):

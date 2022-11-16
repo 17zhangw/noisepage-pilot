@@ -67,6 +67,7 @@ SELECT
               WHEN 'ModifyTableInsert' THEN 1
               WHEN 'ModifyTableUpdate' THEN counter8
               WHEN 'ModifyTableDelete' THEN counter5
+              WHEN 'BitmapIndexScan' THEN counter0
               WHEN 'BitmapHeapScan' THEN counter1 + counter2
               END) as total_tuples_touched,
     width_bucket(query_order, array[{values}]) as window_bucket
@@ -78,6 +79,7 @@ WHERE comment IN (
     'ModifyTableInsert',
     'ModifyTableUpdate',
     'ModifyTableDelete',
+    'BitmapIndexScan',
     'BitmapHeapScan'
 )
 GROUP BY COALESCE(target_idx_scan_table, target), comment, window_bucket) s,

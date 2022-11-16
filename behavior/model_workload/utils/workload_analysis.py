@@ -34,7 +34,7 @@ QUERY_CONTENT_BLOCK = [
 ]
 
 
-def process_schemas(connection, input_dir, tables):
+def process_schemas(connection, input_dir, workload_only, tables):
     # table_attr_map defines all attributes that might exist per table.
     table_attr_map = {t: [] for t in tables}
     reloid_table_map = {}
@@ -56,9 +56,9 @@ def process_schemas(connection, input_dir, tables):
     # Otherwise, we could arbitrarily split the analysis off at that point in time.
     with connection.cursor(row_factory=dict_row) as cursor:
         # Read in the files.
-        pg_index = pd.read_csv(f"{input_dir}/pg_index.csv")
-        pg_class = pd.read_csv(f"{input_dir}/pg_class.csv")
-        pg_attribute = pd.read_csv(f"{input_dir}/pg_attribute.csv")
+        pg_index = pd.read_csv(f"{input_dir}/pg_index.csv" if not workload_only else f"{input_dir}/pg_index.csv.0")
+        pg_class = pd.read_csv(f"{input_dir}/pg_class.csv" if not workload_only else f"{input_dir}/pg_class.csv.0")
+        pg_attribute = pd.read_csv(f"{input_dir}/pg_attribute.csv" if not workload_only else f"{input_dir}/pg_attribute.csv.0")
 
         # Make the t=0 is same as t=end assumption.
         pg_index = pg_index[pg_index.time == pg_index.iloc[-1].time]
@@ -345,9 +345,9 @@ def process_query_templates(pg_qss_plans, table_attr_map):
     return query_template_map
 
 
-def workload_analysis(connection, input_dir, tables):
+def workload_analysis(connection, input_dir, workload_only, tables):
     # Process the schemas.
-    table_attr_map, reloid_table_map, table_index_map, table_keyspace_map, indexoid_table_map, indexoid_name_map = process_schemas(connection, input_dir, tables)
+    table_attr_map, reloid_table_map, table_index_map, table_keyspace_map, indexoid_table_map, indexoid_name_map = process_schemas(connection, input_dir, workload_only, tables)
 
     # Process the plans.
     pg_qss_plans = process_plans(input_dir, table_attr_map, indexoid_table_map, indexoid_name_map)

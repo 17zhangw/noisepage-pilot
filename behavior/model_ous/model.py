@@ -128,6 +128,7 @@ class BehaviorModel:
         self.xscaler = RobustScaler() if config["robust"] else StandardScaler()
         self.yscaler = RobustScaler() if config["robust"] else StandardScaler()
         self.targets = targets
+        self.fitted_round = False
 
     def support_incremental(self):
         # Can't do incremental if normalizing inputs.
@@ -154,11 +155,13 @@ class BehaviorModel:
             x = self.xscaler.fit_transform(x)
             y = self.yscaler.fit_transform(y)
 
-        if self.support_incremental():
+        if self.support_incremental() and self.fitted_round:
             # Allow for continuous fit.
             self.model.fit(x, y, init_model=self.model)
         else:
             self.model.fit(x, y)
+
+        self.fitted_round = True
 
 
     def predict(self, x):

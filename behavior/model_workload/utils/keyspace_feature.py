@@ -70,6 +70,7 @@ TABLE_EXEC_FEATURES_QUERY = """
 			    WHEN 'IndexScan' THEN b.counter0
 			    WHEN 'IndexOnlyScan' THEN b.counter0
 			    WHEN 'SeqScan' THEN b.counter0
+                            WHEN 'BitmapIndexScan' THEN b.counter0
                             WHEN 'BitmapHeapScan' THEN b.counter1 + b.counter2
 			    ELSE 0 END) OVER w AS num_select_tuples,
 

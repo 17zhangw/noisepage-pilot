@@ -194,12 +194,19 @@ def task_behavior_train():
     Behavior modeling: train OU models.
     """
 
-    def train_cmd(config_file, train_data, prefix_allow_derived_features, robust, log_transform):
+    def train_cmd(config_file, train_data, prefix_allow_derived_features, robust, log_transform, separate_indkey_features, trace_inputs, force_nonincremental, output_subpath):
         train_args = (
             f"--config-file {config_file} "
             f"--dir-data {train_data} "
-            f"--dir-output {ARTIFACT_MODELS} "
         )
+
+        if output_subpath is None:
+            train_args += f"--dir-output {ARTIFACT_MODELS} "
+        else:
+            train_args += f"--dir-output {ARTIFACT_MODELS}/{output_subpath} "
+
+        if force_nonincremental is not None:
+            train_args = train_args + "--force-nonincremental "
 
         if robust is not None:
             train_args = train_args + "--robust "
@@ -210,6 +217,12 @@ def task_behavior_train():
         if prefix_allow_derived_features != "":
             train_args = train_args + f"--prefix-allow-derived-features {prefix_allow_derived_features} "
 
+        if separate_indkey_features:
+            train_args = train_args + f"--separate-indkey-features "
+
+        if trace_inputs is not None:
+            train_args = train_args + "--trace-inputs "
+
         return f"python3 -m behavior train {train_args}"
 
     return {
@@ -218,36 +231,15 @@ def task_behavior_train():
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
         "params": [
-            {
-                "name": "config_file",
-                "long": "config_file",
-                "help": "Path to configuration file to use.",
-                "default": MODELING_CONFIG_FILE,
-            },
-            {
-                "name": "train_data",
-                "long": "train_data",
-                "help": "Root of a recursive glob to gather all feather files for training data.",
-                "default": ARTIFACT_DATA_OUS,
-            },
-            {
-                "name": "prefix_allow_derived_features",
-                "long": "prefix_allow_derived_features",
-                "help": "List of prefixes to use for selecting derived features for training the model.",
-                "default": "",
-            },
-            {
-                "name": "robust",
-                "long": "robust",
-                "help": "Whether to use the robust scaler to normalize to the data.",
-                "default": None,
-            },
-            {
-                "name": "log_transform",
-                "long": "log_transform",
-                "help": "Whether to use the log_transform to the data.",
-                "default": None,
-            },
+            { "name": "config_file", "long": "config_file", "help": "Path to configuration file to use.", "default": MODELING_CONFIG_FILE, },
+            { "name": "train_data", "long": "train_data", "help": "Root of a recursive glob to gather all feather files for training data.", "default": ARTIFACT_DATA_OUS, },
+            { "name": "prefix_allow_derived_features", "long": "prefix_allow_derived_features", "help": "List of prefixes to use for selecting derived features for training the model.", "default": "", },
+            { "name": "robust", "long": "robust", "help": "Whether to use the robust scaler to normalize to the data.", "default": None, },
+            { "name": "log_transform", "long": "log_transform", "help": "Whether to use the log_transform to the data.", "default": None, },
+            { "name": "separate_indkey_features", "long": "separate_indkey_features", "help": "Whether to separate each indkey feature.", "default": None, },
+            { "name": "trace_inputs", "long": "trace_inputs", "help": "Whether to trace transformed inputs to the model", "default": None, },
+            { "name": "force_nonincremental", "long": "force_nonincremental", "help": "Whether to force nonincremental training.", "default": None, },
+            { "name": "output_subpath", "long": "output_subpath", "help": "Subpath in the output directory.", "default": None, },
         ],
     }
 
@@ -330,28 +322,43 @@ def task_behavior_eval_query_workload():
     """
     Behavior modeling: perform query-level model analysis using a workload model.
     """
-    def eval_cmd(session_sql, input_dir, output_dir, ou_models,
-                 query_feature_granularity_queries, table_feature_model_path,
-                 buffer_page_model_path, buffer_access_model_path, concurrency_model_path,
-                 concurrency_granularity_sec, concurrency_mpi, workload_analysis_conn,
-                 target_db_conn, workload_analysis_prefix, histogram_width):
+    def eval_cmd(num_cpus, num_threads, session_sql, input_dir, output_dir, ou_models,
+                 query_feature_granularity_queries,
+                 table_feature_model_cls, table_feature_model_path,
+                 buffer_page_model_cls, buffer_page_model_path,
+                 buffer_access_model_cls, buffer_access_model_path,
+                 concurrency_model_cls, concurrency_model_path,
+                 concurrency_mpi, workload_analysis_conn,
+                 target_db_conn, workload_analysis_prefix, histogram_width, forward_state,
+                 use_plan_estimates):
         eval_args = (
+            f"--num-cpus {num_cpus} "
+            f"--num-threads {num_threads} "
             f"--session-sql {session_sql} "
             f"--input-dir {input_dir} "
             f"--output-dir {output_dir} "
             f"--ou-models {ou_models} "
             f"--query-feature-granularity-queries {query_feature_granularity_queries} "
+            f"--table-feature-model-cls {table_feature_model_cls} "
             f"--table-feature-model-path {table_feature_model_path} "
+            f"--buffer-page-model-cls {buffer_page_model_cls} "
             f"--buffer-page-model-path {buffer_page_model_path} "
+            f"--buffer-access-model-cls {buffer_access_model_cls} "
             f"--buffer-access-model-path {buffer_access_model_path} "
+            f"--concurrency-model-cls {concurrency_model_cls} "
             f"--concurrency-model-path {concurrency_model_path} "
-            f"--concurrency-granularity-sec {concurrency_granularity_sec} "
             f"--concurrency-mpi {concurrency_mpi} "
             f"--workload-analysis-conn \"{workload_analysis_conn}\" "
             f"--target-db-conn \"{target_db_conn}\" "
             f"--workload-analysis-prefix {workload_analysis_prefix} "
             f"--histogram-width {histogram_width} "
         )
+
+        if forward_state is not None:
+            eval_args += f"--forward-state "
+
+        if use_plan_estimates is not None:
+            eval_args += f"--use-plan-estimates "
 
         return f"python3 -m behavior eval_query_workload {eval_args}"
 
@@ -361,21 +368,28 @@ def task_behavior_eval_query_workload():
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
         "params": [
+            { "name": "num_cpus", "long": "num_cpus", "help": "Number of CPUs to use for parallel OUs.", "default": 1, },
+            { "name": "num_threads", "long": "num_threads", "help": "Number of threads/CPU to use for parallel OUs.", "default": 1, },
             { "name": "session_sql", "long": "session_sql", "help": "Path to a list of SQL statements that should be executed in the session prior to EXPLAIN.", "default": None, },
             { "name": "input_dir", "long": "input_dir", "help": "Input directory for data.", "default": None, },
             { "name": "output_dir", "long": "output_dir", "help": "Output directory for evals.", "default": None, },
             { "name": "ou_models", "long": "ou_models", "help": "Path to OU models.", "default": None, },
             { "name": "query_feature_granularity_queries", "help": "Granularity of window slices in queries.", "default": 1000, },
+            { "name": "table_feature_model_cls", "long": "table_feature_model_cls", "help": "Table Feature model to instantiate", "default": "TableFeatureModel", },
             { "name": "table_feature_model_path", "long": "table_feature_model_path", "help": "Path to Table Feature models.", "default": None, },
+            { "name": "buffer_page_model_cls", "long": "buffer_page_model_cls", "help": "Buffer Page model to instantiate.", "default": "BufferPageModel", },
             { "name": "buffer_page_model_path", "long": "buffer_page_model_path", "help": "Path to Buffer Page models.", "default": None, },
+            { "name": "buffer_access_model_cls", "long": "buffer_acccess_model_cls", "help": "Buffer Access model to instantiate.", "default": "BufferAccessModel", },
             { "name": "buffer_access_model_path", "long": "buffer_acccess_model_path", "help": "Path to Buffer Access models.", "default": None, },
+            { "name": "concurrency_model_cls", "long": "concurrency_model_cls", "help": "Concurrency Model to instantiate.", "default": "ConcurrencyModel", },
             { "name": "concurrency_model_path", "long": "concurrency_model_path", "help": "Path to Concurrency models.", "default": None, },
-            { "name": "concurrency_granularity_sec", "long": "concurrency_granularity_sec", "help": "Concurrency granularity in seconds.", "default": 1 },
             { "name": "concurrency_mpi", "long": "concurrency_mpi", "help": "Concurrency MPI.", "default": None, },
             { "name": "workload_analysis_conn", "long": "workload_analysis_conn", "help": "psycopg2 connection string to connect to the workload database instance.", "default": None, },
             { "name": "target_db_conn", "long": "target_db_conn", "help": "psycopg2 connection string to connect to the target database instance.", "default": None, },
             { "name": "workload_analysis_prefix", "long": "workload_analysis_prefix", "help": "Workload analysis prefix to use.", "default": None, },
             { "name": "histogram_width", "long": "histogram_width", "help": "Number of buckets (histogram width).", "default": None, },
+            { "name": "forward_state", "long": "forward_state", "help": "Whether to forward initial state or not.", "default": False, },
+            { "name": "use_plan_estimates", "long": "use_plan_estimates", "help": "Whether to use postgres plan estimates as opposed to row execution features.", "default": False, },
         ],
     }
 
@@ -384,14 +398,14 @@ def task_behavior_eval_query_plots():
     """
     Behavior modeling: generate plots from eval_query[_workload] analysis.
     """
-    def eval_cmd(input_dir, txn_analysis_file, generate_summary, generate_holistic, generate_per_query, generate_predict_abs_errors):
+    def eval_cmd(input_dir, txn_analysis_file, generate_summary, generate_per_query, deviation_around_mean, generate_predict_abs_errors):
         eval_args = (
             f"--dir-input {input_dir} "
+            f"--deviation-around-mean {deviation_around_mean} "
         )
 
         vals = [
             ("--generate-summary", generate_summary),
-            ("--generate-holistic", generate_holistic),
             ("--generate-per-query", generate_per_query),
             ("--generate-predict-abs-errors", generate_predict_abs_errors),
         ]
@@ -411,42 +425,12 @@ def task_behavior_eval_query_plots():
         "verbosity": VERBOSITY_DEFAULT,
         "uptodate": [False],
         "params": [
-            {
-                "name": "input_dir",
-                "long": "input_dir",
-                "help": "Path to root folder containing the input data to plot.",
-                "default": None,
-            },
-            {
-                "name": "txn_analysis_file",
-                "long": "txn_analysis_file",
-                "help": "Path to transaction analysis file.",
-                "default": None,
-            },
-            {
-                "name": "generate_summary",
-                "long": "generate_summary",
-                "help": "Whether to generate summary error information.",
-                "default": None,
-            },
-            {
-                "name": "generate_holistic",
-                "long": "generate_holistic",
-                "help": "Whether to generate holistic KDE plots of the errors.",
-                "default": None,
-            },
-            {
-                "name": "generate_per_query",
-                "long": "generate_per_query",
-                "help": "Whether to generate per-query plots of the errors.",
-                "default": None,
-            },
-            {
-                "name": "generate_predict_abs_errors",
-                "long": "generate_predict_abs_errors",
-                "help": "Whether to generate abs errors against each table.",
-                "default": None,
-            },
+            { "name": "input_dir", "long": "input_dir", "help": "Path to root folder containing the input data to plot.", "default": None, },
+            { "name": "txn_analysis_file", "long": "txn_analysis_file", "help": "Path to transaction analysis file.", "default": None, },
+            { "name": "generate_summary", "long": "generate_summary", "help": "Whether to generate summary error information.", "default": None, },
+            { "name": "generate_per_query", "long": "generate_per_query", "help": "Whether to generate per-query plots of the errors.", "default": None, },
+            { "name": "deviation_around_mean", "long": "deviation_around_mean", "help": "Deviation to plot around mean for per-query plots.", "default": 0, },
+            { "name": "generate_predict_abs_errors", "long": "generate_predict_abs_errors", "help": "Whether to generate abs errors against each table.", "default": None, },
         ],
     }
 

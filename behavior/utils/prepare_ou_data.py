@@ -29,7 +29,7 @@ TRAILING_BLOCKED_FEATURES = [
 ]
 
 
-def prepare_index_input_data(df):
+def prepare_index_input_data(df, nodrop, separate_indkey_features):
     # This logic is used to replace all the indkey n_distinct_ data (make it positive).
     distinct_keys = [col for col in df.columns if "indkey_n_distinct_" in col]
     filter_check = lambda x: x >= 0
@@ -54,7 +54,10 @@ def prepare_index_input_data(df):
         "indkey_correlation_",
     ]
     blocked = ([col for col in df.columns for prefix in slot if prefix in col])
-    if len(blocked) > 0:
+
+    # Execute the following sequence only if we are running under nodrop (we want everything)
+    # or we don't want separate indkey features.
+    if len(blocked) > 0 and (nodrop or not separate_indkey_features):
         varying_keys = [col for col in df.columns if "indkey_attvarying_" in col]
         attlen_keys = [col for col in df.columns if "indkey_attlen_" in col]
         atttypmod_keys = [col for col in df.columns if "indkey_attypmod_" in col]
@@ -69,17 +72,33 @@ def prepare_index_input_data(df):
         for col in avg_width_keys:
             df["indkey_cum_avg_width"] += (df[col].fillna(0))
         for col in attlen_keys:
-            df["indkey_cum_attfixed"] += ((df[col].fillna(0)) != -1).astype(int)
+            # This is a special case where we should fill as (-1).
+            df["indkey_cum_attfixed"] += ((df[col].fillna(-1)) != -1).astype(int)
         filter_check = lambda x: x >= 0
         for col in attlen_keys:
             df["indkey_cum_attlen"] += (df[col].fillna(0)).where(filter_check, 0)
         for col in atttypmod_keys:
             df["indkey_cum_attlen"] += (df[col].fillna(0)).where(filter_check, 0)
-        df.drop(columns=blocked, inplace=True, errors='raise')
+
+        if not nodrop:
+            df.drop(columns=blocked, inplace=True, errors='raise')
+    elif not nodrop and separate_indkey_features:
+        # This is the case where we allow dropping and we only care about indkey features.
+        # (this is primarily the train case where separate_indkey_features is set).
+
+        # Dropping these is described above.
+        refined = [
+            "indkey_n_distinct_",
+            "indkey_null_frac_",
+            "indkey_correlation_",
+        ]
+        blocked = ([col for col in df.columns for prefix in slot if prefix in col])
+        df.drop(columns=blocked, inplace=True, errors='ignore')
+
     return df
 
 
-def clean_input_data(df, is_train):
+def clean_input_data(df, separate_indkey_features, is_train):
     """
     Function prepares input data for an OU.
 
@@ -139,9 +158,9 @@ def clean_input_data(df, is_train):
             if df.dtypes[key] == "object":
                 df[key] = (df[key] == "t").astype(int)
 
-
     # Clean and perform any relevant operations on the input data.
-    df = prepare_index_input_data(df)
+    # If we're training, drop. Otherwise, execute in nodrop.
+    df = prepare_index_input_data(df, nodrop=not is_train, separate_indkey_features=separate_indkey_features)
 
     # This is an OU-specific dataframe operation. Why? Well because we want the num_outer_loops
     # to handle the query-level "nested" behavior.
@@ -194,6 +213,7 @@ def clean_input_data(df, is_train):
 
 class OUDataLoader():
     def _process(self, ou_file, chunk):
+        assert chunk.shape[0] > 0
         assert self.loaded == ou_file
 
         if self.md_plans is not None:
@@ -243,7 +263,7 @@ class OUDataLoader():
             assert chunk.shape[0] <= initial
 
         chunk.reset_index(drop=True, inplace=True)
-        chunk = clean_input_data(chunk, self.train).copy()
+        chunk = clean_input_data(chunk, self.separate_indkey_features, self.train).copy()
         chunk["data_identifier"] = chunk.index
         return chunk
 
@@ -283,10 +303,11 @@ class OUDataLoader():
         self.loaded = ou_file
 
 
-    def __init__(self, logger, ou_files, chunksize, train):
+    def __init__(self, logger, separate_indkey_features, ou_files, chunksize, train):
         super(OUDataLoader, self).__init__()
 
         self.logger = logger
+        self.separate_indkey_features = separate_indkey_features
         self.ou_files = ou_files
         self.chunksize = chunksize
         self.train = train
@@ -325,6 +346,7 @@ class OUDataLoader():
                     # We have reached the end of the current file.
                     self.ou_files = self.ou_files[1:]
                     self.it = None
+                    data = None
 
             if data is not None:
                 # Try and process the data. We have this here becuase we could end up

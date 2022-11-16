@@ -17,59 +17,88 @@ from plumbum import cli
 
 logger = logging.getLogger(__name__)
 
-def generate_holistic(query_stream, dir_output):
-    def plot(df, name):
-        fig, ax = plt.subplots(1, 1, figsize=(25.6, 14.4))
 
-        df.predicted_minus_elapsed.plot.kde(color='r', ax=ax)
-        percentiles = [2.5, 5, 25, 50, 75, 95, 97.5]
-        percents = np.percentile(df.predicted_minus_elapsed, percentiles)
-        bounds = [df.predicted_minus_elapsed.min(), df.predicted_minus_elapsed.max()]
-        ax.scatter(bounds, [0, 0], color='b')
-        ax.scatter(percents, np.zeros(len(percentiles)), color='g')
-        ax.set_xlabel("predicted - elapsed")
+def generate_rolling(query_stream, dir_output):
+    params = {
+        'legend.fontsize': 'x-large',
+        'axes.labelsize': 'x-large',
+        'axes.titlesize':'x-large',
+        'xtick.labelsize':'x-large',
+        'ytick.labelsize':'x-large'
+    }
+    plt.rcParams.update(params)
 
-        plt.savefig(dir_output / f"{name}.png")
-        plt.close()
+    fig, ax = plt.subplots(1, 1, figsize=(25.6, 14.4))
+    fig.suptitle(f"Rolling Workload Cost (sum, window=1000)", wrap=True)
 
-    plot(query_stream, "all_queries")
-    if "OP" in query_stream:
-        plot(query_stream[query_stream.OP == "SELECT"], "all_select")
-        plot(query_stream[query_stream.OP != "SELECT"], "all_modify")
-    else:
-        plot(query_stream[query_stream.num_modify == 0], "all_select")
-        plot(query_stream[query_stream.num_modify != 0], "all_modify")
+    elapsed_us_windows = query_stream.elapsed_us.rolling(10000).sum()
+    pred_elapsed_us_windows = query_stream.pred_elapsed_us.rolling(10000).sum()
+
+    elapsed_us_windows.plot(ax=ax, label="True Workload Cost")
+    pred_elapsed_us_windows.plot(ax=ax, label="Predicted Workload Cost")
+
+    ax.set_ylabel("Total Microseconds")
+    ax.set_xlabel("Window")
+    ax.legend()
+
+    plt.savefig(dir_output / f"rolling_sum.png")
+    plt.close()
+    plt.rcParams.update(plt.rcParamsDefault)
 
 
-def generate_per_query_plots(query_stream, dir_output):
+def generate_per_query_plots(query_stream, deviation_around_mean, dir_output):
+    params = {
+        'legend.fontsize': 'x-large',
+        'axes.labelsize': 'x-large',
+        'axes.titlesize':'x-large',
+        'xtick.labelsize':'x-large',
+        'ytick.labelsize':'x-large'
+    }
+    plt.rcParams.update(params)
+
     # Output error distribution plots based on query_id.
     qid_groups = query_stream.groupby(by=["query_id"])
     for group in qid_groups:
-        logger.info("Processing query %s", group[0])
+        logger.info("Processing query %s (%s)", group[0], group[1].iloc[0].query_text)
         fig, axes = plt.subplots(2, 1, figsize=(25.6, 14.4))
+        fig.suptitle(f"{group[0]}")
         ax = axes[0]
-
 
         # Plot elapsed and predicted elapsed time on the same graph as a scatter.
         x_title = "order" if "order" in query_stream else "query_order"
-        group[1].plot.scatter(title=f"qid: {group[0]}", x=x_title, y="elapsed_us", color='r', ax=ax)
-        group[1].plot.scatter(title=f"qid: {group[0]}", x=x_title, y="pred_elapsed_us", color='b', ax=ax)
+        group[1].plot.scatter(x=x_title, y="elapsed_us", color='r', ax=ax, label="True Runtime")
+        group[1].plot.scatter(x=x_title, y="pred_elapsed_us", color='b', ax=ax, label="Predicted Runtime")
         ax.set_xticks([])
 
-        if len(group[1]) > 1 and len(group[1].predicted_minus_elapsed.value_counts()) > 1:
-            # Only plot the second graph if there is more than 1 distinct value.
-            ax = axes[1]
-            group[1].predicted_minus_elapsed.plot.kde(color='r', ax=ax)
+        if deviation_around_mean > 0:
+            avg = group[1].elapsed_us.mean()
+            yrange = (max(0, avg - deviation_around_mean), min(group[1].elapsed_us.max() + 1, avg + deviation_around_mean))
+            ax.set_ylim(yrange)
 
-            percentiles = [2.5, 5, 25, 50, 75, 95, 97.5]
-            percents = np.percentile(group[1].predicted_minus_elapsed, percentiles)
-            bounds = [group[1].predicted_minus_elapsed.min(), group[1].predicted_minus_elapsed.max()]
-            ax.scatter(bounds, [0, 0], color='b')
-            ax.scatter(percents, np.zeros(len(percentiles)), color='g')
-            ax.set_xlabel("predicted - elapsed")
+        if len(group[1]) > 1 and len(group[1].predicted_minus_elapsed.value_counts()) > 1:
+            # Density of true and predicted.
+            ax = axes[1]
+            group[1].elapsed_us.plot.kde(color='r', ax=ax, label="True Runtime")
+            if len(group[1].pred_elapsed_us.value_counts()) > 1:
+                group[1].pred_elapsed_us.plot.kde(color='b', ax=ax, label="Predicted Runtime")
+            else:
+                ax.axvline(x=group[1].pred_elapsed_us.iloc[0], label="Predicted Runtime")
+            ax.legend()
+
+            # Only plot the second graph if there is more than 1 distinct value.
+            #ax = axes[2]
+            #group[1].predicted_minus_elapsed.plot.kde(color='r', ax=ax)
+
+            #percentiles = [2.5, 5, 25, 50, 75, 95, 97.5]
+            #percents = np.percentile(group[1].predicted_minus_elapsed, percentiles)
+            #bounds = [group[1].predicted_minus_elapsed.min(), group[1].predicted_minus_elapsed.max()]
+            #ax.scatter(bounds, [0, 0], color='b')
+            #ax.scatter(percents, np.zeros(len(percentiles)), color='g')
+            #ax.set_xlabel("predicted - elapsed")
 
         plt.savefig(dir_output / f"{group[0]}.png")
         plt.close()
+    plt.rcParams.update(plt.rcParamsDefault)
 
 
 def generate_predicted_query_error(query_stream, dir_output, min_error_threshold, max_error_threshold):
@@ -183,12 +212,15 @@ def generate_predicted_query_error_modify(query_stream, dir_output):
     txtout.close()
 
 
-def generate_plots(query_stream, dir_output, generate_summary_flag, generate_holistic_flag, generate_per_query_flag, generate_predict_abs_errors_flag):
+def generate_plots(query_stream, dir_output, generate_summary_flag, generate_per_query_flag, deviation_around_mean, generate_predict_abs_errors_flag):
     if generate_summary_flag:
         print("Generating summary plots.")
         with open(dir_output / "summary.txt", "w") as f:
+            missing = query_stream[query_stream.error_missing_model > 0]
             f.write(f"Total Elapsed Us: {query_stream.elapsed_us.sum()}\n")
             f.write(f"Total Predicted Elapsed Us: {query_stream.pred_elapsed_us.sum()}\n")
+            f.write(f"Total Missing Models: {missing.shape[0]}\n")
+            f.write(f"Average # Missing Models: {missing.error_missing_model.sum() / max(1, missing.shape[0])}\n")
 
             def summary(df, prefix):
                 f.write(f"Average Absolute Error ({prefix}): {(df.abs_diff.sum() / df.shape[0])}\n")
@@ -209,6 +241,11 @@ def generate_plots(query_stream, dir_output, generate_summary_flag, generate_hol
                 select = query_stream[query_stream.OP == "SELECT"]
                 modify = query_stream[query_stream.OP != "SELECT"]
 
+            f.write(f"SELECT Elapsed Us: {select.elapsed_us.sum()}\n")
+            f.write(f"SELECT Predicted Elapsed Us: {select.pred_elapsed_us.sum()}\n")
+            f.write(f"MODIFY Elapsed Us: {modify.elapsed_us.sum()}\n")
+            f.write(f"MODIFY Predicted Elapsed Us: {modify.pred_elapsed_us.sum()}\n")
+
             summary(query_stream, "All Queries")
             f.write("\n")
 
@@ -217,13 +254,11 @@ def generate_plots(query_stream, dir_output, generate_summary_flag, generate_hol
 
             summary(modify, "MODIFY")
 
-    if generate_holistic_flag:
-        print("Generating holistic plots.")
-        generate_holistic(query_stream, dir_output)
+        generate_rolling(query_stream, dir_output)
 
     if generate_per_query_flag:
         print("Generating per query plots.")
-        generate_per_query_plots(query_stream, dir_output)
+        generate_per_query_plots(query_stream, deviation_around_mean, dir_output)
 
     if generate_predict_abs_errors_flag:
         print("Generating predicted query error plots for SELECT.")
@@ -234,6 +269,9 @@ def generate_plots(query_stream, dir_output, generate_summary_flag, generate_hol
 
 
 def generate_txn_plots(query_stream, output_dir, txn_analysis_file):
+    if txn_analysis_file is None:
+        return
+
     query_stream.sort_values(by=["statement_timestamp"], inplace=True)
     with open(txn_analysis_file, "r") as f:
         analysis = yaml.load(f, Loader=yaml.FullLoader)
@@ -316,14 +354,32 @@ def generate_txn_plots(query_stream, output_dir, txn_analysis_file):
     shutil.rmtree("/tmp/analysis")
 
 
-def main(dir_input, txn_analysis_file, generate_summary, generate_holistic, generate_per_query, generate_predict_abs_errors):
-    inputs = dir_input.rglob("query_results.feather")
+def main(dir_input, txn_analysis_file, generate_summary, generate_per_query, deviation_around_mean, generate_predict_abs_errors):
+    inputs = [l for l in dir_input.rglob("query_results.feather")] + [l for l in dir_input.rglob("evals/")]
+    inputs = sorted(inputs)
     for input_result in inputs:
         logger.info("Processing: %s", input_result)
-        dir_output = input_result.parent / "plots"
-        dir_output.mkdir(parents=True, exist_ok=True)
 
-        query_stream = pd.read_feather(input_result)
+        if Path(input_result).is_dir():
+            if (Path(input_result) / "query_results.feather").exists():
+                continue
+
+            subframes = glob.glob(f"{input_result}/*.feather")
+            query_stream = pd.concat(map(pd.read_feather, subframes), ignore_index=True)
+            query_stream.loc[query_stream[query_stream.optype == 1].index, "OP"] = "SELECT"
+            query_stream.loc[query_stream[query_stream.optype == 2].index, "OP"] = "INSERT"
+            query_stream.loc[query_stream[query_stream.optype == 3].index, "OP"] = "UPDATE"
+            query_stream.loc[query_stream[query_stream.optype == 4].index, "OP"] = "DELETE"
+            query_stream.to_feather(f"{input_result}/query_results.feather")
+            dir_output = Path(input_result) / "plots"
+        else:
+            query_stream = pd.read_feather(input_result)
+            dir_output = input_result.parent / "plots"
+
+        if "pred_elapsed_us_bias" in query_stream:
+            query_stream["pred_elapsed_us"] = query_stream["pred_elapsed_us_bias"]
+
+        dir_output.mkdir(parents=True, exist_ok=True)
         query_stream["predicted_minus_elapsed"] = query_stream["pred_elapsed_us"] - query_stream["elapsed_us"]
         query_stream["abs_diff"] = query_stream.predicted_minus_elapsed.apply(lambda c: abs(c))
         query_stream["cnt"] = 1
@@ -351,12 +407,12 @@ def main(dir_input, txn_analysis_file, generate_summary, generate_holistic, gene
 
         for (flag, query_stream) in consider_streams:
             if flag == "original":
-                generate_plots(query_stream, dir_output, generate_summary, generate_holistic, generate_per_query, generate_predict_abs_errors)
+                generate_plots(query_stream, dir_output, generate_summary, generate_per_query, deviation_around_mean, generate_predict_abs_errors)
                 generate_txn_plots(query_stream, dir_output, txn_analysis_file)
             elif flag != "original":
                 sub_output = dir_output / f"{flag}"
                 sub_output.mkdir(parents=True, exist_ok=True)
-                generate_plots(query_stream, sub_output, generate_summary, generate_holistic, generate_per_query, generate_predict_abs_errors)
+                generate_plots(query_stream, sub_output, generate_summary, generate_per_query, deviation_around_mean, generate_predict_abs_errors)
                 generate_txn_plots(query_stream, sub_output, txn_analysis_file)
 
         del query_stream
@@ -384,16 +440,17 @@ class EvalQueryPlotsCLI(cli.Application):
         help="Whether to generate summary error information.",
     )
 
-    generate_holistic = cli.Flag(
-        "--generate-holistic",
-        default=False,
-        help="Whether to generate holistic KDE plots of the errors.",
-    )
-
     generate_per_query = cli.Flag(
         "--generate-per-query",
         default=False,
         help="Whether to generate per-query plots of the errors.",
+    )
+
+    deviation_around_mean = cli.SwitchAttr(
+        "--deviation-around-mean",
+        int,
+        help="Deviation to plot around mean for per-query plots.",
+        default=0,
     )
 
     generate_predict_abs_errors = cli.Flag(
@@ -403,7 +460,12 @@ class EvalQueryPlotsCLI(cli.Application):
     )
 
     def main(self):
-        main(self.dir_input, self.txn_analysis_file, self.generate_summary, self.generate_holistic, self.generate_per_query, self.generate_predict_abs_errors)
+        main(self.dir_input,
+             self.txn_analysis_file,
+             self.generate_summary,
+             self.generate_per_query,
+             self.deviation_around_mean,
+             self.generate_predict_abs_errors)
 
 
 if __name__ == "__main__":

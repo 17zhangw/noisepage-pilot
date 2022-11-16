@@ -15,7 +15,10 @@ from dataclasses import dataclass
 from distutils import util
 from enum import Enum, auto, unique
 
-from bcc import BPF, USDT
+try:
+    from bcc import BPF, USDT
+except:
+    pass
 
 import psutil
 import setproctitle

@@ -74,8 +74,11 @@ def main(
     dir_data,
     dir_output,
     prefix_allow_derived_features,
+    separate_indkey_features,
     robust,
     log_transform,
+    force_nonincremental,
+    trace_inputs,
 ):
     # Load modeling configuration.
     if not config_file.exists():
@@ -122,7 +125,7 @@ def main(
                 ignore_cols.append(v)
 
         # Arbitrarily set the chunk size to be 131072
-        loader = OUDataLoader(logger, ou_results, 131072, True)
+        loader = OUDataLoader(logger, separate_indkey_features, ou_results, 131072, True)
         df_train = loader.get_next_data()
 
         # We have no data.
@@ -151,27 +154,33 @@ def main(
                 contains_nonincremental = True
             models.append(model)
 
-        it = 0
-        while df_train is not None:
-            for model in models:
-                if model.support_incremental():
-                    logger.info("Partially updating (%s, %s) chunk %s", ou_name, model.method, it)
-                    x_train = df_train[features]
-                    y_train = df_train[targets].values
-                    assert x_train.shape[1] != 0 and y_train.shape[1] != 0
-                    model.train(df_train[features], df_train[targets].values)
+        if not force_nonincremental:
+            it = 0
+            while df_train is not None:
+                if trace_inputs:
+                    output = output_dir / f"trace/{ou_name}"
+                    output.mkdir(parents=True, exist_ok=True)
+                    df_train.to_feather(f"{output_dir}/trace/{ou_name}/{it}.feather")
 
-            del df_train
-            df_train = loader.get_next_data()
-            it += 1
-        del loader
+                for model in models:
+                    if model.support_incremental():
+                        logger.info("Partially updating (%s, %s) chunk %s", ou_name, model.method, it)
+                        x_train = df_train[features]
+                        y_train = df_train[targets].values
+                        assert x_train.shape[1] != 0 and y_train.shape[1] != 0
+                        model.train(df_train[features], df_train[targets].values)
 
-        if contains_nonincremental:
-            loader = OUDataLoader(logger, ou_results, None, True)
+                del df_train
+                df_train = loader.get_next_data()
+                it += 1
+            del loader
+
+        if contains_nonincremental or force_nonincremental:
+            loader = OUDataLoader(logger, separate_indkey_features, ou_results, None, True)
             data = loader.get_next_data()
 
             for model in models:
-                if not model.supports_incremental():
+                if not model.support_incremental() or force_nonincremental:
                     logger.info("Fully training (%s, %s)", ou_name, model.method)
 
                     df_train = data.copy()
@@ -179,7 +188,7 @@ def main(
                     y_train = df_train[targets].values
                     del df_train
 
-                    ou_model.train(x_train, y_train)
+                    model.train(x_train, y_train)
 
                     del x_train
                     del y_train
@@ -229,6 +238,21 @@ class TrainCLI(cli.Application):
         default=False,
         help="Whether to force the log transform to the input data.",
     )
+    separate_indkey_features = cli.Flag(
+        "--separate-indkey-features",
+        default=False,
+        help="Whether to use separate indkey features.",
+    )
+    trace_inputs = cli.Flag(
+        "--trace-inputs",
+        default=False,
+        help="Whether to trace the inputs to the models.",
+    )
+    force_nonincremental = cli.Flag(
+        "--force-nonincremental",
+        default=False,
+        help="Whether to force nonincremental training.",
+    )
 
     def main(self):
         main(
@@ -236,8 +260,11 @@ class TrainCLI(cli.Application):
             self.dir_data,
             self.dir_output,
             self.prefix_allow_derived_features,
+            self.separate_indkey_features,
             self.robust,
             self.log_transform,
+            self.force_nonincremental,
+            self.trace_inputs,
         )
 
 

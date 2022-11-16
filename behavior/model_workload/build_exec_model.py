@@ -186,12 +186,15 @@ def run_job(args):
 
             torch.save(data_batch, f"{args.output_path}/dataset.pt")
             torch.save(outputs, f"{args.output_path}/outputs.pt")
+            _, it_loss = model.loss({k: data_batch[-(i + 1)] for i, k in enumerate(target_names)}, outputs)
+            logger.info("Final Loss: %s", it_loss)
 
     # Remove the file handler.
     logger.removeHandler(file_handler)
 
 
-def generate_jobs(model_name, input_dirs, output_dir, lrs, epochs,
+def generate_jobs(model_name, input_dirs, output_dir,
+                  automl_timeout_secs, lrs, epochs,
                   batch_size, hidden, train_size, cuda, depths,
                   sweep_dropout, add_nonnorm_features, hist_width,
                   num_cpus, max_threads, num_iterations, ckpt_interval,
@@ -222,6 +225,7 @@ def generate_jobs(model_name, input_dirs, output_dir, lrs, epochs,
 
                                 args = {
                                     "model_name": model_name,
+                                    "automl_timeout_secs": automl_timeout_secs,
                                     "lr": float(lr),
                                     "num_epochs": int(epoch),
                                     "batch_size": int(batch),
@@ -233,7 +237,7 @@ def generate_jobs(model_name, input_dirs, output_dir, lrs, epochs,
                                     "depth": int(depth),
                                     "input_dirs": input_dirs,
                                     "dropout": dropout,
-                                    "num_threads": min(1, max_threads / num_cpus),
+                                    "num_threads": max(1, max_threads / num_cpus),
                                     "hist_width": hist_width,
                                     "ckpt_interval": ckpt_interval,
                                     "patience": patience,
@@ -265,21 +269,21 @@ class BuildExecModelCLI(cli.Application):
     lr = cli.SwitchAttr(
         "--lr",
         str,
-        mandatory=True,
+        default="0.001",
         help="Learning rate to use for training.",
     )
 
     epochs = cli.SwitchAttr(
         "--epochs",
         str,
-        mandatory=True,
+        default="1000",
         help="Epochs to use for training.",
     )
 
     batch_size = cli.SwitchAttr(
         "--batch-size",
         str,
-        mandatory=True,
+        default="256",
         help="Batch size to use for training.",
     )
 
@@ -299,14 +303,14 @@ class BuildExecModelCLI(cli.Application):
     hidden = cli.SwitchAttr(
         "--hidden",
         str,
-        mandatory=True,
+        default="256",
         help="Number of hidden units to use across the model.",
     )
 
     depth = cli.SwitchAttr(
         "--depth",
         str,
-        mandatory=True,
+        default="1",
         help="Depth to use in the model.",
     )
 
@@ -392,10 +396,18 @@ class BuildExecModelCLI(cli.Application):
         help="Default slices to consider for buffer page model.",
     )
 
+    automl_timeout_secs = cli.SwitchAttr(
+        "--automl-timeout-secs",
+        int,
+        default=3600,
+        help="Number of seconds for the AutoML timeout.",
+    )
+
     def main(self):
         generate_jobs(self.model_name,
                       self.input_dirs.split(","),
                       self.output_dir,
+                      self.automl_timeout_secs,
                       self.lr.split(","),
                       self.epochs.split(","),
                       self.batch_size.split(","),
