@@ -184,7 +184,6 @@ def collector(histograms, collector_flags, pid, socket_fd):
     markers_c = markers_c.replace("MAX_PID", str(max_pid))
     markers_c = markers_c.replace("TARGET_PID", str(pid))
 
-    markers = USDT(pid=pid)
     marker_probes = USDT(pid=pid)
     for probe in ["qss_ExecutorStart", "qss_ExecutorEnd", "qss_Block", "qss_Unblock"]:
         marker_probes.enable_probe(probe=probe, fn_name=probe)
@@ -197,7 +196,11 @@ def collector(histograms, collector_flags, pid, socket_fd):
     collector_bpf.attach_kretprobe(event="vfs_write", fn_name="trace_write_return")
 
     window_count = 0
-    hists = [(0, collector_bpf.get_table("dist0")), (1, collector_bpf.get_table("dist6")),  (2, collector_bpf.get_table("dist10")),]
+    hists = [
+        (0, collector_bpf.get_table("dist0")),
+        (1, collector_bpf.get_table("dist6")),
+        (2, collector_bpf.get_table("dist10")),
+    ]
     while collector_flags[pid]:
         try:
             # No perf event, so just sleep...

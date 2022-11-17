@@ -1,8 +1,11 @@
+import glob
 import json
 import pglast
 import pandas as pd
+import numpy as np
 from psycopg.rows import dict_row
 from behavior.model_workload.utils import OpType
+from behavior.utils import read_all_plans
 
 class WorkloadAnalysis:
     # table_attr_map defines all attributes that might exist per table.
@@ -58,7 +61,7 @@ def process_schemas(connection, input_dir, workload_only, tables):
         # Read in the files.
         pg_index = pd.read_csv(f"{input_dir}/pg_index.csv" if not workload_only else f"{input_dir}/pg_index.csv.0")
         pg_class = pd.read_csv(f"{input_dir}/pg_class.csv" if not workload_only else f"{input_dir}/pg_class.csv.0")
-        pg_attribute = pd.read_csv(f"{input_dir}/pg_attribute.csv" if not workload_only else f"{input_dir}/pg_attribute.csv.0")
+        pg_attribute = pd.read_csv(f"{input_dir}/pg_attribute.csv" if not workload_only else f"{input_dir}/pg_attribute.csv.0", low_memory=False)
 
         # Make the t=0 is same as t=end assumption.
         pg_index = pg_index[pg_index.time == pg_index.iloc[-1].time]
@@ -117,7 +120,7 @@ def process_schemas(connection, input_dir, workload_only, tables):
 
 def process_plans(input_dir, table_attr_map, indexoid_table_map, indexoid_name_map):
     # Process all the plans to get the query text.
-    pg_qss_plans = pd.read_csv(f"{input_dir}/pg_qss_plans.csv")
+    pg_qss_plans = read_all_plans(input_dir)
     pg_qss_plans["query_text"] = ""
     pg_qss_plans["target"] = ""
     pg_qss_plans["num_rel_refs"] = 0

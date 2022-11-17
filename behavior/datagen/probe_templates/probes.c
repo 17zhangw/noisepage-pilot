@@ -2,10 +2,14 @@
 #include <linux/sched.h>
 #include <linux/fs.h>
 
-BPF_HASH(block, u32, u64, 100);
-BPF_HASH(execstart, u32, u64, 100);
-BPF_HASH(start, u32, u64, 100);
-BPF_HASH(offtime, u32, u64, 100);
+// Whether to block accumulate (keyed on bpf_get_current_pid_tgid() >> 32).
+BPF_HASH(block, u32, u64, 512);
+// Whether we have started executing query.
+BPF_HASH(execstart, u32, u64, 512);
+// Whether we have started tracking the off-time.
+BPF_HASH(start, u32, u64, 512);
+// Where we accumulate offtimes and whether we should.
+BPF_HASH(offtime, u32, u64, 512);
 
 BPF_HISTOGRAM(dist0);
 BPF_HISTOGRAM(dist6);
@@ -68,6 +72,9 @@ void qss_Unblock(struct pt_regs* ctx)
 
 void qss_ExecutorEnd(struct pt_regs* ctx)
 {
+    s64 elapsed = 0;
+    bpf_usdt_readarg(1, ctx, &elapsed);
+
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 tgid = pid_tgid >> 32;
 
@@ -79,18 +86,18 @@ void qss_ExecutorEnd(struct pt_regs* ctx)
     if (tsp == 0)
         return;
 
-    u64 elapsed = (bpf_ktime_get_ns() - (*startts)) / 1000;
-    u64 td = (*tsp) == 0 ? 1 : (*tsp);
-
-    // This is the time that OU models try to predict I think...
-    // Under the assumption that we don't capture the I/O in offcpu.
-    u32 oncpu = bpf_log2l(elapsed - td);
-    if (oncpu <= 6)
-        dist0.increment(bpf_log2l(td));
-    else if (oncpu <= 10)
-        dist6.increment(bpf_log2l(td));
-    else
-        dist10.increment(bpf_log2l(td));
+    u64 slp = (*tsp) == 0 ? 1 : (*tsp);
+    if (elapsed > 0 && slp < elapsed) {
+        // This is the time that OU models try to predict I think...
+        // Under the assumption that we don't capture the I/O in offcpu.
+        u32 oncpu = bpf_log2l(elapsed - slp);
+        if (oncpu < 7)
+            dist0.increment(bpf_log2l(slp));
+        else if (oncpu < 11)
+            dist6.increment(bpf_log2l(slp));
+        else
+            dist10.increment(bpf_log2l(slp));
+    }
     block.delete(&tgid);
 }
 
@@ -118,7 +125,7 @@ int trace_write_return(struct pt_regs *ctx)
     return 0;
 }
 
-static inline void store_start(u32 tgid, u32 pid, u64 ts)
+static inline void store_start(u32 tgid, u64 ts)
 {
     if (tgid != TARGET_PID)
         return;
@@ -133,19 +140,19 @@ static inline void store_start(u32 tgid, u32 pid, u64 ts)
     if (b != 0)
         return;
 
-    start.update(&pid, &ts);
+    start.update(&tgid, &ts);
 }
 
-static inline void update_hist(u32 tgid, u32 pid, u64 ts)
+static inline void update_hist(u32 tgid, u64 ts)
 {
     if (tgid != TARGET_PID)
         return;
 
-    u64 *tsp = start.lookup(&pid);
+    u64 *tsp = start.lookup(&tgid);
     if (tsp == 0)
         return;
 
-    u64 *off = offtime.lookup(&pid);
+    u64 *off = offtime.lookup(&tgid);
     if (off == 0)
         return;
 
@@ -157,23 +164,22 @@ static inline void update_hist(u32 tgid, u32 pid, u64 ts)
 
     u64 delta = (ts - *tsp) / 1000;
     u64 offtotal = (*off) + delta;
-    offtime.update(&pid, &offtotal);
+    offtime.update(&tgid, &offtotal);
     start.delete(&tgid);
 }
 
 int sched_switch(struct pt_regs *ctx, struct task_struct *prev)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 tgid = pid_tgid >> 32, pid = pid_tgid;
+    u32 tgid = pid_tgid >> 32;
 
-    u32 prev_pid = prev->pid;
     u32 prev_tgid = prev->tgid;
     u64 ts = bpf_ktime_get_ns();
 
     // Update runtime for old.
-    update_hist(tgid, pid, ts);
+    update_hist(tgid, ts);
 
     // Store that we are now tracking the new one.
-    store_start(prev_tgid, prev_pid, ts);
+    store_start(prev_tgid, ts);
     return 0;
 }

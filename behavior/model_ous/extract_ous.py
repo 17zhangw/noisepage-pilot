@@ -1,3 +1,4 @@
+import glob
 import logging
 import json
 import psycopg
@@ -27,6 +28,7 @@ from behavior.utils.process_pg_state_csvs import (
     PG_ATTRIBUTE_SCHEMA,
     PG_STATS_SCHEMA,
 )
+from behavior.utils import read_all_plans
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +120,8 @@ def prepare_qss_plans(plans_df):
 
 
 def load_plans(data_folder):
-    plans_df = prepare_qss_plans(pd.read_csv(data_folder / "pg_qss_plans.csv"))
+    plans = read_all_plans(data_folder)
+    plans_df = prepare_qss_plans(plans)
     valid_queries = plans_df[["query_id", "plan_node_id"]].groupby(by=["query_id"]).max() + 1
     plans_df.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
     plans_df.sort_index(axis=0, inplace=True)
@@ -213,39 +216,49 @@ def construct_diff_sql(work_prefix, raw, all_columns, diff_columns, constrain_ch
 def load_initial_data(connection, data_folder, work_prefix, plans_df):
     with open(f"/tmp/{work_prefix}_stats.csv", "w") as f:
         write_header = True
-        for chunk in tqdm(pd.read_csv(data_folder / "pg_qss_stats.csv", chunksize=8192*1000)):
-            chunk = chunk[(chunk.plan_node_id != -1) & (chunk.query_id != 0) & (chunk.statement_timestamp != 0)]
-            if chunk.shape[0] == 0:
-                continue
+        stats_files = [f for f in glob.glob(f"{data_folder}/stats.*/pg_qss_stats_*.csv")]
+        for stats_file in tqdm(stats_files, leave=False):
+            for chunk in tqdm(pd.read_csv(stats_file, chunksize=8192*1000), leave=False):
+                chunk = chunk[(chunk.plan_node_id != -1) & (chunk.query_id != 0) & (chunk.statement_timestamp != 0)]
+                chunk = chunk[chunk.query_id.isin(plans_df.query_id)]
+                if chunk.shape[0] == 0:
+                    continue
 
-            # These have no matching plan, so we actually need to drop them...
-            # Any costs are pretty much meaningless.
-            noplans = chunk[chunk.plan_node_id < 0].copy()
+                if chunk["query_id"].dtype != "int64":
+                    # Convert to int64 if needed.
+                    chunk = chunk.copy()
+                    chunk["query_id"] = chunk.query_id.astype(np.int64)
 
-            for col in plans_df:
+                # These have no matching plan, so we actually need to drop them...
+                # Any costs are pretty much meaningless.
+                noplans = chunk[chunk.plan_node_id < 0].copy()
                 # Wipe the child plans.
                 noplans["left_child_node_id"] = -1
                 noplans["right_child_node_id"] = -1
 
-            chunk.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
-            chunk.sort_index(axis=0, inplace=True)
+                # These should have valid plans attached to them
+                plans = chunk[chunk.plan_node_id >= 0].copy()
+                plans.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
+                plans.sort_index(axis=0, inplace=True)
 
-            chunk = pd.merge_asof(chunk, plans_df, left_index=True, right_index=True, by=["query_id", "generation", "db_id", "pid", "plan_node_id"], allow_exact_matches=True)
-            chunk.reset_index(drop=False, inplace=True)
-            chunk.drop(chunk[chunk.total_cost.isna()].index, inplace=True)
+                chunk = pd.merge_asof(plans, plans_df, left_index=True, right_index=True, by=["query_id", "generation", "db_id", "pid", "plan_node_id"], allow_exact_matches=True)
+                chunk.reset_index(drop=False, inplace=True)
+                # Assert that we actually don't have any missing plans.
+                # chunk.drop(chunk[chunk.total_cost.isna()].index, inplace=True)
+                assert chunk.total_cost.isna().sum() == 0
 
-            # Recombine.
-            chunk = pd.concat([chunk, noplans], ignore_index=True)
-            chunk["unix_timestamp"] = postgres_julian_to_unix(chunk.statement_timestamp)
+                # Recombine.
+                chunk = pd.concat([chunk, noplans], ignore_index=True)
+                chunk["unix_timestamp"] = postgres_julian_to_unix(chunk.statement_timestamp)
 
-            chunk = chunk[[t[0] for t in QSS_STATS_COLUMNS]]
-            if chunk.shape[0] == 0:
-                continue
+                chunk = chunk[[t[0] for t in QSS_STATS_COLUMNS]]
+                if chunk.shape[0] == 0:
+                    continue
 
-            chunk["left_child_node_id"] = chunk.left_child_node_id.astype(int)
-            chunk["right_child_node_id"] = chunk.right_child_node_id.astype(int)
-            chunk.to_csv(f, header=write_header, index=False)
-            write_header = False
+                chunk["left_child_node_id"] = chunk.left_child_node_id.astype(int)
+                chunk["right_child_node_id"] = chunk.right_child_node_id.astype(int)
+                chunk.to_csv(f, header=write_header, index=False)
+                write_header = False
 
     with connection.transaction():
         create_stats_sql = f"CREATE UNLOGGED TABLE {work_prefix}_raw (" + ",".join([f"{tup[0]} {tup[1]}" for tup in QSS_STATS_COLUMNS]) + ")"
@@ -311,7 +324,7 @@ CREATE_PLAN_COLUMNS = [
 def load_metadata(connection, engine, data_dir, work_prefix, plans_df):
     plans_df = plans_df.reset_index(drop=False)
     with engine.begin() as alchemy:
-        pg_attribute = process_time_pg_attribute(pd.read_csv(f"{data_dir}/pg_attribute.csv"))
+        pg_attribute = process_time_pg_attribute(pd.read_csv(f"{data_dir}/pg_attribute.csv", low_memory=False))
         pg_stats = process_time_pg_stats(pd.read_csv(f"{data_dir}/pg_stats.csv"))
         pg_index = process_time_pg_index(pd.read_csv(f"{data_dir}/pg_index.csv"))
         time_tables, time_cls_indexes = process_time_pg_class(pd.read_csv(f"{data_dir}/pg_class.csv"))
@@ -490,7 +503,8 @@ def main(dir_data, experiment, dir_output, work_prefix, host, port, db_name, use
         bench_names: list[str] = [d.name for d in experiment_root.iterdir() if d.is_dir()]
         for bench_name in bench_names:
             data_folder = experiment_root / bench_name
-            if not Path(data_folder / "pg_qss_stats.csv").exists():
+            ou_stats = [s for s in glob.glob(f"{data_folder}/stats.*/pg_qss_stats_*.csv")]
+            if len(ou_stats) == 0:
                 continue
 
             logger.info("Benchmark: %s", bench_name)

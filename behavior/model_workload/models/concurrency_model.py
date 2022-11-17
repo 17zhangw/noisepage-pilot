@@ -17,7 +17,7 @@ import torch
 import torch.distributions as D
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import MSELoss
+from torch.nn import L1Loss
 from torch.utils.data import dataset
 from torch.utils.data import DataLoader
 import logging
@@ -70,10 +70,19 @@ def generate_dataset(logger, model_args, automl=False):
 
     def produce_scaler(dirs):
         files = [f"{d}/concurrency/step{s}/data.feather" for d in dirs for s in model_args.steps]
+        frames = [f"{d}/concurrency/step{s}/frame.feather" for d in dirs for s in model_args.steps]
         data = pd.concat(map(pd.read_feather, files))
-        return MinMaxScaler().fit(data.relpages.values.reshape(-1, 1)), MinMaxScaler().fit(data.reltuples.values.reshape(-1, 1))
+        frame = pd.concat(map(pd.read_feather, frames))
 
-    def handle(in_dir, step, relpages_scaler, reltuples_scaler):
+        data.set_index(keys=["mpi", "step", "window_bucket"], inplace=True)
+        frame.set_index(keys=["mpi", "step", "window_index"], inplace=True)
+        data = data.join(frame, on=["mpi", "step", "window_bucket"], how="inner")
+        data.reset_index(drop=False, inplace=True)
+        del frame
+
+        return MinMaxScaler().fit(data.relpages.values.reshape(-1, 1)), MinMaxScaler().fit(data.reltuples.values.reshape(-1, 1)), MinMaxScaler().fit(data.mpi.values.reshape(-1, 1)), MinMaxScaler().fit(data.elapsed_slice_queries.values.reshape(-1, 1))
+
+    def handle(in_dir, step, relpages_scaler, reltuples_scaler, mpi_scaler, elapsed_slice_queries_scaler):
         logger.info("Processing input from: %s", in_dir)
         data = pd.read_feather(f"{in_dir}/concurrency/step{step}/data.feather")
         frame = pd.read_feather(f"{in_dir}/concurrency/step{step}/frame.feather")
@@ -93,20 +102,30 @@ def generate_dataset(logger, model_args, automl=False):
         if automl:
             data["norm_relpages"] = data.relpages
             data["norm_reltuples"] = data.reltuples
+            data["norm_mpi"] = data.mpi
+            data["norm_elapsed_slice_queries"] = data.elapsed_slice_queries
         else:
             data["norm_relpages"] = relpages_scaler.transform(data.relpages.values.reshape(-1, 1))
             data["norm_reltuples"] = reltuples_scaler.transform(data.reltuples.values.reshape(-1, 1))
+            data["norm_mpi"] = mpi_scaler.transform(data.mpi.values.reshape(-1, 1))
+            data["norm_elapsed_slice_queries"] = elapsed_slice_queries_scaler.transform(data.elapsed_slice_queries.values.reshape(-1, 1))
 
         # Assume every query succeeds I guess...
         for window in data.groupby(by=["mpi", "step", "elapsed_slice", "window_bucket"]):
             mpi = window[0][0]
 
-            all_queries = window[1].elapsed_slice_queries.iloc[0]
+            all_queries = window[1].norm_elapsed_slice_queries.iloc[0]
             target = window[1].targets.iloc[0]
             key_bias, key_dists, masks, all_bias, addt_feats = extract_train_tables_keys_features(model_args.add_nonnorm_features, tbl_map, tbl_mapping, keys, hist_width, window[1], window[0][3])
 
+            elapsed_slice = 0
+            if window[0][1] == 1:
+                elapsed_slice = 0.5
+            elif window[0][2] == 2:
+                elapsed_slice = 1
+
             # If you change the global_feats order, change the classes assignemnt.
-            global_feats.append([all_queries, mpi, window[0][2]])
+            global_feats.append([all_queries, window[1].norm_mpi.iloc[0], elapsed_slice])
             global_bias.append(all_bias)
             global_targets.append(target)
             global_addt_feats.append(addt_feats)
@@ -114,10 +133,12 @@ def generate_dataset(logger, model_args, automl=False):
             global_key_dists.append(key_dists)
             global_masks.append(masks)
 
-    relpages_scaler, reltuples_scaler = produce_scaler(model_args.input_dirs)
+    relpages_scaler, reltuples_scaler, mpi_scaler, elapsed_slice_queries_scaler = produce_scaler(model_args.input_dirs)
     (Path(model_args.dataset_path)).mkdir(parents=True, exist_ok=True)
     joblib.dump(relpages_scaler, f"{model_args.dataset_path}/relpages_scaler.gz")
     joblib.dump(reltuples_scaler, f"{model_args.dataset_path}/reltuples_scaler.gz")
+    joblib.dump(mpi_scaler, f"{model_args.dataset_path}/mpi_scaler.gz")
+    joblib.dump(elapsed_slice_queries_scaler, f"{model_args.dataset_path}/elapsed_slice_queries_scaler.gz")
 
     for d in model_args.input_dirs:
         c = f"{d}/keyspaces.pickle"
@@ -132,7 +153,7 @@ def generate_dataset(logger, model_args, automl=False):
 
     for d in model_args.input_dirs:
         for s in model_args.steps:
-            handle(d, int(s), relpages_scaler, reltuples_scaler)
+            handle(d, int(s), relpages_scaler, reltuples_scaler, mpi_scaler, elapsed_slice_queries_scaler)
 
     if not automl:
         with tempfile.NamedTemporaryFile("wb") as f:
@@ -168,6 +189,8 @@ class ConcurrencyModel(nn.Module):
         parent_dir = Path(model_file).parent
         model.relpages_scaler = joblib.load(f"{parent_dir}/relpages_scaler.gz")
         model.reltuples_scaler = joblib.load(f"{parent_dir}/reltuples_scaler.gz")
+        model.mpi_scaler = joblib.load(f"{parent_dir}/mpi_scaler.gz")
+        model.elapsed_slice_queries_scaler = joblib.load(f"{parent_dir}/elapsed_slice_queries_scaler.gz")
         return model
 
     def __init__(self, model_args, num_outputs):
@@ -176,12 +199,12 @@ class ConcurrencyModel(nn.Module):
         input_size = 4 * model_args.hist_width
 
         # Mapping from keyspace -> embedding.
-        self.dist = construct_stack(input_size, model_args.hidden_size, model_args.hidden_size, model_args.dropout, model_args.depth, activation="Sigmoid")
+        self.dist = construct_stack(input_size, model_args.hidden_size, model_args.hidden_size, model_args.dropout, model_args.depth)
         # Mapping from tbl + keyspace -> embedding
         num_inputs = 4 if model_args.add_nonnorm_features else 2
-        self.comb_tbls = construct_stack(model_args.hidden_size + num_inputs, model_args.hidden_size, model_args.hidden_size, model_args.dropout, model_args.depth, activation="Sigmoid")
+        self.comb_tbls = construct_stack(model_args.hidden_size + num_inputs, model_args.hidden_size, model_args.hidden_size, model_args.dropout, model_args.depth)
         # Final mapping.
-        self.final = construct_stack(model_args.hidden_size + 3, model_args.hidden_size, num_outputs, model_args.dropout, model_args.depth, activation="Sigmoid")
+        self.final = construct_stack(model_args.hidden_size + 3, model_args.hidden_size, num_outputs, model_args.dropout, model_args.depth)
 
     def forward(self, **kwargs):
         global_feats = kwargs["global_feats"]
@@ -211,14 +234,11 @@ class ConcurrencyModel(nn.Module):
         input_vec = torch.sum(bias_tbl_feats, dim=1, keepdim=False)
         input_vec = torch.cat([global_feats, input_vec], dim=1)
         outputs = self.final(input_vec)
-        return F.softmax(outputs, dim=1)
+        return outputs
 
     def loss(self, target_outputs, model_outputs):
         outputs = target_outputs["global_targets"]
-        offset = outputs - model_outputs
-        offset = torch.cumsum(offset, dim=1)
-        offset = torch.abs(offset).sum(dim=1)
-        loss = offset.mean()
+        loss = L1Loss()(outputs, model_outputs)
         return loss, loss.item()
 
     def get_dataset(logger, model_args):
@@ -274,7 +294,7 @@ class ConcurrencyModel(nn.Module):
         tbl_mapping = {t:i for i, t in enumerate(table_attr_map)}
         norm_relpages = self.relpages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_mapping]).reshape(-1, 1))
         norm_reltuples = self.reltuples_scaler.transform(np.array([table_state[t]["approx_tuple_count"] for t in tbl_mapping]).reshape(-1, 1))
-
+        norm_mpi = self.mpi_scaler.transform(np.array([mpi]).reshape(-1, 1))
         for t, tbl_state in table_state.items():
             tbl_state["norm_relpages"] = norm_relpages[tbl_mapping[t]][0]
             tbl_state["norm_reltuples"] = norm_reltuples[tbl_mapping[t]][0]
@@ -286,6 +306,7 @@ class ConcurrencyModel(nn.Module):
                 subqueries = queries[(queries.pred_elapsed_us < limit) & (queries.pred_elapsed_us >= (ranges[i-1][1] if i > 0 else 0))]
             else:
                 subqueries = queries[queries.pred_elapsed_us > ranges[i-1][1]]
+            norm_subqueries = self.elapsed_slice_queries_scaler.transform(np.array([subqueries.shape[0]]).reshape(-1, 1))
 
             global_blks_requested = 0
             for _, tbl_state in table_state.items():
@@ -318,7 +339,13 @@ class ConcurrencyModel(nn.Module):
                     table_state,
                     keyspace_feat_space)
 
-            global_feats.append([subqueries.shape[0], mpi, step])
+            elapsed_slice = 0
+            if step == 1:
+                elapsed_slice = 0.5
+            elif step == 2:
+                elapsed_slice = 1
+
+            global_feats.append([norm_subqueries[0][0], norm_mpi[0][0], elapsed_slice])
             global_bias.append(all_bias)
             global_addt_feats.append(addt_feats)
             global_key_bias.append(key_bias)
@@ -414,7 +441,7 @@ class AutoMLConcurrencyModel():
         targets = [c for c in dataset if "target" in c]
         num = len(targets)
         model_file = self.model_args.output_path
-        predictor = MultilabelPredictor(labels=targets, problem_types=["regression"]*num, eval_metrics=["mean_squared_error"]*num, path=model_file)
+        predictor = MultilabelPredictor(labels=targets, problem_types=["regression"]*num, eval_metrics=["mean_absolute_error"]*num, path=model_file)
         predictor.fit(dataset, time_limit=self.model_args.automl_timeout_secs, presets="medium_quality")
         with open(f"{self.model_args.output_path}/args.pickle", "wb") as f:
             pickle.dump(self.model_args, f)
@@ -474,10 +501,16 @@ class AutoMLConcurrencyModel():
                     table_state,
                     keyspace_feat_space)
 
+            elapsed_slice = 0
+            if step == 1:
+                elapsed_slice = 0.5
+            elif step == 2:
+                elapsed_slice = 1
+
             input_row = {
                 "num_queries": subqueries.shape[0],
                 "mpi": mpi,
-                "step": step,
+                "step": elapsed_slice,
             }
 
             for t, tidx in tbl_mapping.items():

@@ -1,4 +1,5 @@
 import os
+import glob
 import psycopg
 from tqdm import tqdm
 import pandas as pd
@@ -17,6 +18,7 @@ from behavior.model_workload.utils.keyspace_feature import build_table_exec
 from behavior.model_workload.utils.data_cardest import compute_underspecified
 from behavior.model_workload.utils.eval_analysis import load_eval_windows
 from behavior.model_ous.extract_ous import construct_diff_sql
+from behavior.utils import read_all_plans
 
 
 logger = logging.getLogger("workload_analyze")
@@ -74,40 +76,50 @@ DIFFERENCE_COLUMNS = [
 def load_raw_data(connection, workload_only, work_prefix, input_dir, plans_df, indexoid_table_map, indexoid_name_map):
     with open(f"/tmp/{work_prefix}_stats.csv", "w") as f:
         write_header = True
-        for chunk in tqdm(pd.read_csv(input_dir / "pg_qss_stats.csv", chunksize=8192*1000)):
-            mask = chunk.query_id.isin(plans_df.query_id)
-            chunk = chunk[mask]
-            if workload_only:
-                # If we're workload only, ensure we only load the root nodes.
-                chunk = chunk[chunk.plan_node_id == -1]
+        stats_files = [f for f in glob.glob(f"{input_dir}/stats.*/pg_qss_stats_*.csv")]
+        for stats_file in tqdm(stats_files, leave=False):
+            for chunk in tqdm(pd.read_csv(stats_file, chunksize=8192*1000), leave=False):
+                mask = chunk.query_id.isin(plans_df.query_id)
+                chunk = chunk[mask]
+                if chunk.shape[0] == 0:
+                    continue
 
-            chunk.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
-            chunk.sort_index(axis=0, inplace=True)
-            initial = chunk.shape[0]
+                if workload_only:
+                    # If we're workload only, ensure we only load the root nodes.
+                    chunk = chunk[chunk.plan_node_id == -1]
 
-            chunk = pd.merge_asof(chunk, plans_df, left_index=True, right_index=True, by=["query_id", "generation", "db_id", "pid", "plan_node_id"], allow_exact_matches=True)
-            chunk.reset_index(drop=False, inplace=True)
-            # We don't actually want to drop. Just set their child plans to -1.
-            # chunk.drop(chunk[chunk.total_cost.isna()].index, inplace=True)
-            chunk.fillna(value={"left_child_node_id": -1, "right_child_node_id": -1}, inplace=True)
-            # Ensure that we don't have magical explosion.
-            assert chunk.shape[0] <= initial
+                if chunk["query_id"].dtype != "int64":
+                    # Convert to int64 if needed.
+                    chunk = chunk.copy()
+                    chunk["query_id"] = chunk.query_id.astype(np.int64)
 
-            chunk["target_idx_insert"] = None
-            mask = chunk.comment == "ModifyTableIndexInsert"
-            chunk.loc[mask, "target"] = chunk[mask].payload.apply(lambda x: indexoid_table_map[x] if x in indexoid_table_map else None)
-            chunk.loc[mask, "target_idx_insert"] = chunk[mask].payload.apply(lambda x: indexoid_name_map[x] if x in indexoid_name_map else None)
-            chunk["unix_timestamp"] = postgres_julian_to_unix(chunk.statement_timestamp)
+                chunk.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
+                chunk.sort_index(axis=0, inplace=True)
+                initial = chunk.shape[0]
 
-            chunk = chunk[[t[0] for t in QSS_STATS_COLUMNS]]
-            if chunk.shape[0] == 0:
-                continue
+                chunk = pd.merge_asof(chunk, plans_df, left_index=True, right_index=True, by=["query_id", "generation", "db_id", "pid", "plan_node_id"], allow_exact_matches=True)
+                chunk.reset_index(drop=False, inplace=True)
+                # We don't actually want to drop. Just set their child plans to -1.
+                # chunk.drop(chunk[chunk.total_cost.isna()].index, inplace=True)
+                chunk.fillna(value={"left_child_node_id": -1, "right_child_node_id": -1}, inplace=True)
+                # Ensure that we don't have magical explosion.
+                assert chunk.shape[0] <= initial
 
-            chunk["left_child_node_id"] = chunk.left_child_node_id.astype(int)
-            chunk["right_child_node_id"] = chunk.right_child_node_id.astype(int)
-            chunk["optype"] = chunk.optype.astype('Int32')
-            chunk.to_csv(f, header=write_header, index=False)
-            write_header = False
+                chunk["target_idx_insert"] = None
+                mask = chunk.comment == "ModifyTableIndexInsert"
+                chunk.loc[mask, "target"] = chunk[mask].payload.apply(lambda x: indexoid_table_map[x] if x in indexoid_table_map else None)
+                chunk.loc[mask, "target_idx_insert"] = chunk[mask].payload.apply(lambda x: indexoid_name_map[x] if x in indexoid_name_map else None)
+                chunk["unix_timestamp"] = postgres_julian_to_unix(chunk.statement_timestamp)
+
+                chunk = chunk[[t[0] for t in QSS_STATS_COLUMNS]]
+                if chunk.shape[0] == 0:
+                    continue
+
+                chunk["left_child_node_id"] = chunk.left_child_node_id.astype(int)
+                chunk["right_child_node_id"] = chunk.right_child_node_id.astype(int)
+                chunk["optype"] = chunk.optype.astype('Int32')
+                chunk.to_csv(f, header=write_header, index=False)
+                write_header = False
 
     logger.info("Creating the raw database table now.")
     with connection.transaction():
@@ -223,7 +235,7 @@ def analyze_workload(benchmark, input_dir, workload_only, psycopg2_conn, work_pr
 
         if load_hits:
             # We need the raw plans to load the hits correctly.
-            plans = pd.read_csv(f"{input_dir}/pg_qss_plans.csv")
+            plans = read_all_plans(input_dir)
             logger.info("Computing data access frames.")
             compute_underspecified(logger, connection, work_prefix, wa, plans)
 
