@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from distutils import util
 from enum import Enum, auto, unique
 
+from datetime import timedelta
+from datetime import datetime
+
 try:
     from bcc import BPF, USDT
 except:
@@ -24,7 +27,7 @@ import psutil
 import setproctitle
 import psycopg
 from psycopg.rows import dict_row
-from behavior import BENCHDB_TO_TABLES
+from behavior import BENCHDB_TO_TABLES, BENCHDB_TO_INDEX
 from behavior.datagen.pg_collector_utils import SettingType, _time_unit_to_ms, _parse_field, KNOBS
 
 
@@ -94,6 +97,8 @@ def pg_collector(output_rows, output_columns, slow_time, shutdown):
 
     setproctitle.setproctitle("Userspace Collector Process")
     with psycopg.connect("host=localhost port=5432 dbname=benchbase user=wz2", autocommit=True) as connection:
+        # Don't allow capturing on the collector instance.
+        connection.execute("SET qss_capture_enabled = OFF")
         with connection.cursor() as cursor:
             global collector_pids
             pid = [r for r in cursor.execute("SELECT pg_backend_pid()")][0][0]
@@ -102,6 +107,7 @@ def pg_collector(output_rows, output_columns, slow_time, shutdown):
         # Poll on the Collector's output buffer until Collector is shut down.
         while not shutdown.is_set():
             try:
+                start = datetime.now()
                 knob_values = scrape_settings(connection, KNOBS)
                 knob_columns = [k[0] for k in knob_values]
                 knob_values = [k[1] for k in knob_values]
@@ -113,7 +119,11 @@ def pg_collector(output_rows, output_columns, slow_time, shutdown):
                     output_columns[target] = columns
                     output_rows[target].extend(tuples)
 
-                time.sleep(slow_time)
+                end = datetime.now()
+                delta = (end - start) / timedelta(microseconds=1)
+                if delta > (slow_time * 1000000):
+                    continue
+                time.sleep((slow_time * 1000000 - delta) / 1000000)
             except KeyboardInterrupt:
                 logger.info("Userspace Collector caught KeyboardInterrupt.")
             except Exception as e:  # pylint: disable=broad-except
@@ -232,17 +242,22 @@ def collector(histograms, collector_flags, pid, socket_fd):
     logger.info("Collector for PID %s shut down.", pid)
 
 
-def main(benchmark, outdir, collector_interval, pid):
+def main(benchmark, outdir, collector_interval, pid, bpf_trace):
     keep_running = True
 
     # Augment with pgstattuple_approx data.
     tables = BENCHDB_TO_TABLES[benchmark]
     for tbl in tables:
         PG_COLLECTOR_TARGETS[tbl] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstattuple_approx('{tbl}');"
+    for idx in BENCHDB_TO_INDEX[benchmark]:
+        PG_COLLECTOR_TARGETS[idx] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstatindex('{idx}');"
 
     # Monitor the postgres PID.
     setproctitle.setproctitle("Main Collector Process")
-    postgres_bpf = monitor_postgres_pid(pid)
+    postgres_bpf = None
+    if bpf_trace:
+        assert pid is not None, "Postgres PID not specified."
+        postgres_bpf = monitor_postgres_pid(pid)
 
     with mp.Manager() as manager:
         # Create coordination data structures for Collectors and Processors
@@ -268,13 +283,18 @@ def main(benchmark, outdir, collector_interval, pid):
             ),
         )
         pg_collector_process.start()
-        cb = postmaster_event_cb(postgres_bpf, histograms, collector_processes, collector_flags)
-        postgres_bpf["postmaster_events"].open_perf_buffer(callback=cb, lost_cb=lost_something)
-        print(f"TScout attached to PID {pid}.")
+
+        if bpf_trace:
+            cb = postmaster_event_cb(postgres_bpf, histograms, collector_processes, collector_flags)
+            postgres_bpf["postmaster_events"].open_perf_buffer(callback=cb, lost_cb=lost_something)
+            print(f"TScout attached to PID {pid}.")
 
         while keep_running:
             try:
-                postgres_bpf.perf_buffer_poll()
+                if bpf_trace:
+                    postgres_bpf.perf_buffer_poll()
+                else:
+                    time.sleep(collector_interval)
             except KeyboardInterrupt:
                 keep_running = False
                 signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -290,11 +310,12 @@ def main(benchmark, outdir, collector_interval, pid):
         pg_collector_process.join()
         print("Shutdown Userspace Collector")
 
-        for pid, process in collector_processes.items():
-            collector_flags[pid] = False
-            process.join()
-            logger.info("Joined Collector for PID %s.", pid)
-        print("TScout joined all Collectors.")
+        if bpf_trace:
+            for pid, process in collector_processes.items():
+                collector_flags[pid] = False
+                process.join()
+                logger.info("Joined Collector for PID %s.", pid)
+            print("TScout joined all Collectors.")
 
         PG_COLLECTOR_TARGETS["pg_settings"] = None
         for target in PG_COLLECTOR_TARGETS.keys():
@@ -306,9 +327,10 @@ def main(benchmark, outdir, collector_interval, pid):
                     writer.writerow(pg_scrape_columns[target])
                 writer.writerows(pg_scrape_tuples[target])
 
-        data = [hist for hist in histograms]
-        if len(data) > 0:
-            pd.DataFrame(data=data).fillna(0).to_csv(f"{outdir}/histograms.csv", index=False)
+        if bpf_trace:
+            data = [hist for hist in histograms]
+            if len(data) > 0:
+                pd.DataFrame(data=data).fillna(0).to_csv(f"{outdir}/histograms.csv", index=False)
         print("Collector wrote out pg collector data.")
 
         # We're done.
@@ -342,12 +364,16 @@ class CollectorCLI(cli.Application):
     pid = cli.SwitchAttr(
         "--pid",
         int,
-        mandatory=True,
         help="Postmaster PID that we're attaching to.",
     )
 
+    bpf_trace = cli.Flag(
+        "--bpf-trace",
+        help="Whether to use BPF for further tracing.",
+    )
+
     def main(self):
-        main(self.benchmark, self.outdir, self.collector_interval, self.pid)
+        main(self.benchmark, self.outdir, self.collector_interval, self.pid, self.bpf_trace)
 
 
 if __name__ == "__main__":

@@ -296,9 +296,20 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
                 sort_clauses.append(f"{work_prefix}_{tbl}.{col}")
     lateral = len(sort_clauses) > 0 and limit > 0
 
-    q = f"INSERT INTO {work_prefix}_{target}_hits (query_order, statement_timestamp, unix_timestamp, optype, " + ",".join(rel_keys) + ") "
+    # FIXME(BITMAP): Support resolving bitmap index scan use.
+    idx_use_join = """
+        LEFT JOIN LATERAL (SELECT query_order, target_idx_scan FROM {work_prefix}_mw_queries q WHERE
+                                                a.query_id = q.query_id AND q.target = '{query_tbl}' AND
+                                                a.query_order = q.query_order AND
+                                                q.comment IN ('IndexScan', 'IndexOnlyScan') AND
+                                                q.target_idx_scan_table = '{target}' AND
+                                                q.plan_node_id >= 0
+        ) q ON q.query_order = a.query_order
+    """.format(work_prefix=work_prefix, query_tbl=query_tbl, target=target)
+
+    q = f"INSERT INTO {work_prefix}_{target}_hits (query_order, statement_timestamp, unix_timestamp, optype, index_used, " + ",".join(rel_keys) + ") "
     # We will always extract these from queries_args table.
-    q += f"SELECT a.query_order, a.statement_timestamp, a.unix_timestamp, a.optype"
+    q += f"SELECT a.query_order, a.statement_timestamp, a.unix_timestamp, a.optype, q.target_idx_scan"
     if len(allowed_tbls) == 0:
         assert len(sort_clauses) == 0
         assert plan_generation is None and pid is None
@@ -310,32 +321,44 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
             ty = get_type(datatypes, work_prefix, query_tbl, k)
             args.append(f"a.{v}::{ty}")
         q += "," + ",".join(args)
-        q += f" FROM {work_prefix}_mw_queries_args a WHERE a.target = '{query_tbl}' and a.query_id = {qid}"
+        q += f" FROM {work_prefix}_mw_queries_args a " + idx_use_join
+        q += f" WHERE a.target = '{query_tbl}' and a.query_id = {qid}"
     else:
         # Attach the correct table prefix depending on if we need to lateral join or not.
         tbl_prefix = "b." if lateral else f"{work_prefix}_{target}."
         q += "," + ",".join([f"{tbl_prefix}{k}" for k in rel_keys])
-
-        q += f" FROM {work_prefix}_mw_queries_args a, "
+        q += f" FROM {work_prefix}_mw_queries_args a "
         if lateral:
             # If we are performing a lateral, start the lateral subquery.
-            q += "LATERAL (SELECT " + ",".join(rel_keys) + " FROM "
+            q += "JOIN LATERAL (SELECT " + ",".join(rel_keys) + " FROM "
+            # Insert all the relevant tables we are going to pull data from.
+            q += ",".join([f"{work_prefix}_{t}" for t in use_tbls]) + " WHERE "
 
-        # Insert all the relevant tables we are going to pull data from.
-        q += ",".join([f"{work_prefix}_{t}" for t in use_tbls]) + " WHERE "
+            # Attach all the predicates that we care about.
+            q += " and ".join([f" {work_prefix}_{t}.insert_version <= a.query_order " for t in use_tbls])
+            q += " and " + " and ".join([f" ({work_prefix}_{t}.delete_version is NULL or {work_prefix}_{t}.delete_version >= a.query_order) " for t in use_tbls])
+            if len(predicates) > 0:
+                q += " and " + " and ".join(predicates)
 
-        # Attach all the predicates that we care about.
-        q += " and ".join([f" {work_prefix}_{t}.insert_version <= a.query_order " for t in use_tbls])
-        q += " and " + " and ".join([f" ({work_prefix}_{t}.delete_version is NULL or {work_prefix}_{t}.delete_version >= a.query_order) " for t in use_tbls])
-        if len(predicates) > 0:
-            q += " and " + " and ".join(predicates)
-
-        if lateral:
             # Attach the lateral sort.
             q += " ORDER BY " + ",".join(sort_clauses) + f" LIMIT {limit} "
-            q += ") b WHERE "
+            q += ") b ON true "
+            q += idx_use_join + " WHERE "
         else:
-            q += " and "
+            # Insert all the relevant tables we are going to pull data from.
+            join_clause = """
+                JOIN {work_prefix}_{t} ON {work_prefix}_{t}.insert_version <= a.query_order
+                                      AND ({work_prefix}_{t}.delete_version IS NULL OR {work_prefix}_{t}.delete_version >= a.query_order)
+                                      AND {aux_preds}
+            """
+            dual_preds = [pred for pred in predicates if pred.count(work_prefix) > 1]
+            single_preds = [pred for pred in predicates if pred.count(work_prefix) == 1]
+            table_preds = {t: [p for p in single_preds if t in p] for t in use_tbls}
+            q += "\n".join([join_clause.format(work_prefix=work_prefix, t=t, aux_preds=" AND ".join(table_preds[t])) for t in use_tbls])
+            q += idx_use_join + " WHERE "
+            if len(dual_preds) > 0:
+                q += " and ".join(dual_preds)
+                q += " and "
 
         q += f" a.target = '{query_tbl}' and a.query_id = {qid} "
         if plan_generation is not None:
@@ -365,7 +388,13 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
             if tbl in datatypes:
                 # Create the _hits table.
                 att_keys = [k for k in datatypes[tbl].keys() if k not in ["insert_version", "delete_version"]]
-                atts = ["query_order bigint", "statement_timestamp bigint", "unix_timestamp float8", "optype int"] + [f"{k} {get_type(datatypes, work_prefix, t, k)}" for k in att_keys]
+                atts = [
+                    "query_order bigint",
+                    "statement_timestamp bigint",
+                    "unix_timestamp float8",
+                    "optype int",
+                    "index_used text",
+                ] + [f"{k} {get_type(datatypes, work_prefix, t, k)}" for k in att_keys]
                 tbl += "_hits"
                 q = f"CREATE UNLOGGED TABLE {tbl} (" + ",".join(atts) + ") WITH (autovacuum_enabled = OFF)"
                 connection.execute(q)
@@ -430,12 +459,12 @@ def compute_underspecified(logger, connection, work_prefix, wa, plans):
                             process_plan(child[0], carry)
                             # Push the carried information forwards!
                             process_plan(child[1], carry)
-                        elif nt in [OperatingUnit.IndexScan.name, OperatingUnit.IndexOnlyScan.name, OperatingUnit.SeqScan.name, OperatingUnit.BitmapIndexScan.name]:
+                        elif nt in [OperatingUnit.IndexScan.name, OperatingUnit.IndexOnlyScan.name, OperatingUnit.SeqScan.name]:
+                            # FIXME(BITMAP): Support probing with the BitmapIndexScan.
                             key = {
                                 OperatingUnit.IndexScan.name: "IndexScan_scan_scanrelid_oid",
                                 OperatingUnit.IndexOnlyScan.name: "IndexOnlyScan_scan_scanrelid_oid",
                                 OperatingUnit.SeqScan.name: "SeqScan_scanrelid_oid",
-                                OperatingUnit.BitmapIndexScan.name: "BitmapIndexScan_scan_scanrelid_oid",
                             }[nt]
 
                             relname = reloid_table_map[f"{current_node[key]}"]

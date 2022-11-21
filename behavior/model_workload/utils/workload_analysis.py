@@ -121,6 +121,7 @@ def process_schemas(connection, input_dir, workload_only, tables):
 def process_plans(input_dir, table_attr_map, indexoid_table_map, indexoid_name_map):
     # Process all the plans to get the query text.
     pg_qss_plans = read_all_plans(input_dir)
+    pg_qss_plans = pg_qss_plans[pg_qss_plans.query_id != 0]
     pg_qss_plans["query_text"] = ""
     pg_qss_plans["target"] = ""
     pg_qss_plans["num_rel_refs"] = 0
@@ -395,7 +396,7 @@ def workload_analysis(connection, input_dir, workload_only, tables):
                            or any([(tbl, a + "_low") in query_template_map[b] for b in query_template_map])] # Is attr in the query template map.
         table_attr_map[tbl] = new_attr_list
 
-    query_table_map = {(p.query_text, p.query_id, p.optype != OpType.SELECT.value): p.target for p in pg_qss_plans.itertuples()}
+    query_table_map = {(p.query_text, p.query_id, p.optype != OpType.SELECT.value): p.target for p in pg_qss_plans.itertuples() if p.target != ""}
     query_sorts_map = {p.query_id: (p.limit, p.orderby) for p in pg_qss_plans.itertuples()}
 
     wa = WorkloadAnalysis()

@@ -259,8 +259,8 @@ def augment_ous_exec_features(target_conn, query, ous, qcache, ougc, use_plan_es
             it_label = "SeqScan_num_iterator_used"
 
         elif ou_type == OperatingUnit.BitmapIndexScan:
-            tbl = ougc.oid_table_map[ou["BitmapIndexScan_scan_scanrelid_oid"]]
-            it_label = "BitmapIndexScan_num_tids_found"
+            # FIXME(BITMAP): Insufficient OU instrumentation since we don't see it.
+            assert False, "Currently the OU instrumentation is busted for BitmapIndexScan"
 
         if tbl is not None and it_label is not None:
             if use_plan_estimates or query is None or np.isnan(getattr(query, f"{tbl}_hits")):
@@ -366,15 +366,8 @@ def augment_ous_exec_features(target_conn, query, ous, qcache, ougc, use_plan_es
             new_ous.extend(generate_index_inserts(ou, ougc, num_index_inserts))
 
         elif ou_type == OperatingUnit.BitmapHeapScan:
-            ou["BitmapHeapScan_scan_scanrelid_oid"] = 0
-            for other_ou in ous:
-                if other_ou["node_type"] == OperatingUnit.BitmapIndexScan.name and other_ou["plan_node_id"] == ou["left_child_node_id"]:
-                    ou["BitmapHeapScan_scan_scanrelid_oid"] = other_ou["BitmapIndexScan_scan_scanrelid_oid"]
-            ou["BitmapHeapScan_num_tuples_fetch"] = get_plan_rows_matching_plan_id(ous, ou["left_child_node_id"])
-
-            tbl = ougc.oid_table_map[ou["BitmapHeapScan_scan_scanrelid_oid"]]
-            for _ in range(int(ou[f"BitmapHeapScan_num_tuples_fetch"])):
-                ou["BitmapHeapScan_num_defrag"] += int(random.uniform(0, 1) <= (ougc.table_feature_state[tbl]["defrag_percent"]))
+            # FIXME(BITMAP): Insufficient OU instrumentation since we don't see it.
+            assert False, "Currently the OU instrumentation is busted for BitmapHeapScan"
 
     ous.extend(new_ous)
     return ous

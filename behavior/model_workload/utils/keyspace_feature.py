@@ -12,6 +12,52 @@ from pandas.api import types as pd_types
 from behavior import OperatingUnit
 from behavior.model_workload.utils import OpType
 
+INDEX_EXEC_FEATURES = [
+    ("query_order", "bigint"),
+    ("statement_timestamp", "bigint"),
+    ("unix_timestamp", "float8"),
+    ("optype", "int"),
+    ("txn", "int"),
+    ("target", "text"),
+    ("num_modify_tuples", "int"),
+    ("num_select_tuples", "int"),
+    ("num_extend", "int"),
+    ("num_split", "int"),
+]
+
+INDEX_EXEC_FEATURES_QUERY = """
+SELECT  s.query_order,
+        s.statement_timestamp,
+        s.unix_timestamp,
+        s.optype,
+        s.txn,
+        s.target,
+        MAX(s.num_modify_tuples) as num_modify_tuples,
+        MAX(s.num_select_tuples) as num_select_tuples,
+        MAX(s.num_extend) as num_extend,
+        MAX(s.num_split) as num_split
+FROM (
+    SELECT
+        a.query_order,
+        a.query_id,
+        a.statement_timestamp,
+        a.unix_timestamp,
+        a.optype,
+        a.txn,
+        COALESCE(b.target_idx_insert, b.target_idx_scan, b.target_idx_scan_table, b.target) AS target,
+        SUM(CASE b.comment WHEN 'ModifyTableInsert' THEN 1 WHEN 'ModifyTableUpdate' THEN b.counter8 WHEN 'ModifyTableDelete' THEN b.counter5 ELSE 0 END) OVER w AS num_modify_tuples,
+        SUM(CASE b.comment WHEN 'IndexScan' THEN b.counter0 WHEN 'IndexOnlyScan' THEN b.counter0 ELSE 0 END) OVER w AS num_select_tuples,
+        SUM(CASE b.comment WHEN 'ModifyTableIndexInsert' THEN b.counter1 ELSE 0 END) OVER w AS num_extend,
+        SUM(CASE b.comment WHEN 'ModifyTableIndexInsert' THEN b.counter2 ELSE 0 END) OVER w as num_split
+        FROM {work_prefix}_mw_queries_args a
+        LEFT JOIN {work_prefix}_mw_queries b ON a.query_order = b.query_order AND b.plan_node_id != -1
+        WHERE a.target = '{target}'
+        WINDOW w AS (PARTITION BY a.query_order, b.payload)
+) s
+WHERE position(',' in s.target) = 0
+GROUP BY s.query_order, s.statement_timestamp, s.unix_timestamp, s.optype, s.txn, s.target;
+"""
+
 
 TABLE_EXEC_FEATURES = [
     ("query_order", "bigint"),
@@ -36,6 +82,8 @@ TABLE_EXEC_FEATURES = [
 # num_select_tuples is an awkward one. This is intuitively *every* tuple that is
 # touched regardless of what purpose it is for. For instance, if you update 100
 # tuples, num_select_tuples = 100 and num_modify_tuples = 100.
+#
+# FIXME(BITMAP): Account for BitmapIndex/HeapScan in num_select_tuples/num_defrag
 TABLE_EXEC_FEATURES_QUERY = """
 	SELECT
 		s.query_order,
@@ -57,7 +105,7 @@ TABLE_EXEC_FEATURES_QUERY = """
 			a.unix_timestamp,
 			a.optype,
 			a.txn,
-			a.comment,
+            b.comment,
 			COALESCE(b.target_idx_scan_table, b.target) AS target,
 
 			SUM(CASE b.comment
@@ -70,8 +118,6 @@ TABLE_EXEC_FEATURES_QUERY = """
 			    WHEN 'IndexScan' THEN b.counter0
 			    WHEN 'IndexOnlyScan' THEN b.counter0
 			    WHEN 'SeqScan' THEN b.counter0
-                            WHEN 'BitmapIndexScan' THEN b.counter0
-                            WHEN 'BitmapHeapScan' THEN b.counter1 + b.counter2
 			    ELSE 0 END) OVER w AS num_select_tuples,
 
 			SUM(CASE b.comment
@@ -87,7 +133,6 @@ TABLE_EXEC_FEATURES_QUERY = """
 			    WHEN 'IndexScan' THEN b.counter3
 			    WHEN 'IndexOnlyScan' THEN b.counter3
 			    WHEN 'SeqScan' THEN b.counter1
-                            WHEN 'BitmapHeapScan' THEN b.counter4
 			    ELSE 0 END) OVER w AS num_defrag
 
         FROM {work_prefix}_mw_queries_args a
@@ -108,8 +153,19 @@ def build_table_exec(logger, connection, work_prefix, tables):
         sql += ") WITH (autovacuum_enabled = OFF)"
         connection.execute(sql)
 
+        sql = f"CREATE UNLOGGED TABLE {work_prefix}_mw_stats_index ("
+        sql += ",".join([f"{k} {v}" for k, v in INDEX_EXEC_FEATURES])
+        sql += ") WITH (autovacuum_enabled = OFF)"
+        connection.execute(sql)
+
         for t in tables:
             sql = f"INSERT INTO {work_prefix}_mw_stats " + TABLE_EXEC_FEATURES_QUERY.format(work_prefix=work_prefix, target=t)
+            logger.info("%s", sql)
+            c = connection.execute(sql)
+            logger.info("Finished executing: %s", c.rowcount)
+
+        for t in tables:
+            sql = f"INSERT INTO {work_prefix}_mw_stats_index " + INDEX_EXEC_FEATURES_QUERY.format(work_prefix=work_prefix, target=t)
             logger.info("%s", sql)
             c = connection.execute(sql)
             logger.info("Finished executing: %s", c.rowcount)
@@ -126,7 +182,7 @@ def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_order
     query_orders = [str(q) for q in query_orders]
 
     output_tuples = []
-    def create_histograms(window, optype, maintenance_body, normalizer):
+    def create_histograms(window, optype, index_clause, maintenance_body, normalizer):
         atts = maintenance_body.keys()
         for att in atts:
             subdict = maintenance_body[att]
@@ -150,7 +206,7 @@ def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_order
             assert np.sum(bins) > 0
             bins /= np.sum(bins)
 
-            output_tuples.append([window, optype, att, bins.tolist()])
+            output_tuples.append([window, optype, index_clause, att, bins.tolist()])
 
     # Generate the query template.
     query_template = """
@@ -200,13 +256,14 @@ def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_order
         columns = att_keys + ["bucket", "freq_count"]
         data_frame = pd.DataFrame(insert_rows, columns=columns)
         data_frame["optype"] = "data"
+        data_frame["index_used"] = None
 
         # When computing the keyspace touched, we need to 1-shift the query orders.
         # This is because we want all queries between [query_orders[0], query_orders[1]) to be mapped to 0.
         # This is equivalent to dropping query_orders[0]
-        extract_columns = [f"b.{k}" for k in att_keys] + ["b.optype"]
-        columns = att_keys + ["optype", "bucket", "freq_count"]
-        groups = [f"(b.bucket, b.optype, b.{k})" for k in att_keys]
+        extract_columns = [f"b.{k}" for k in att_keys] + ["b.optype", "b.index_used"]
+        columns = att_keys + ["optype", "index_used", "bucket", "freq_count"]
+        groups = [f"(b.bucket, b.optype, b.index_used, b.{k})" for k in att_keys]
         insert_frame = query_template.format(
             extract_columns=",".join(extract_columns),
             column="query_order",
@@ -303,65 +360,74 @@ def __execute_dist_query(logger, cursor, work_prefix, tbl, att_keys, query_order
 
     input_frame, window_normalizer = acquire_base_data()
     for optype, frame in tqdm(input_frame.groupby(by=["optype"]), leave=False):
-        maintenance_body = {k: {} for k in att_keys}
-        frame = frame.sort_values(by=["bucket"], ignore_index=True)
-        with tqdm(total=frame.bucket.max(), leave=False) as pbar:
-            cur_bucket = 0
-            for t in tqdm(frame.itertuples(), leave=False):
-                if t.bucket != cur_bucket:
-                    if optype == "data" and data_hist:
-                        # Forward the "data" state through the windows.
-                        while cur_bucket < t.bucket:
-                            create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
-                            cur_bucket += 1
-                    elif optype != "data":
-                        create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
-                        maintenance_body = {k: {} for k in att_keys}
+        def generate_histogram(optype, index_clause, frame):
+            maintenance_body = {k: {} for k in att_keys}
+            frame = frame.sort_values(by=["bucket"], ignore_index=True)
+            with tqdm(total=frame.bucket.max(), leave=False) as pbar:
+                cur_bucket = 0
+                for t in tqdm(frame.itertuples(), leave=False):
+                    if t.bucket != cur_bucket:
+                        if optype == "data" and data_hist:
+                            # Forward the "data" state through the windows.
+                            while cur_bucket < t.bucket:
+                                create_histograms(cur_bucket, optype, index_clause, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                                cur_bucket += 1
+                        elif optype != "data":
+                            create_histograms(cur_bucket, optype, index_clause, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                            maintenance_body = {k: {} for k in att_keys}
 
-                    cur_bucket = t.bucket
-                    pbar.update(1)
+                        cur_bucket = t.bucket
+                        pbar.update(1)
 
-                for key in att_keys:
-                    value = getattr(t, key)
-                    if not np.isnan(value):
-                        if value not in maintenance_body[key]:
-                            maintenance_body[key][value] = t.freq_count
-                        else:
-                            maintenance_body[key][value] += t.freq_count
+                    for key in att_keys:
+                        value = getattr(t, key)
+                        if not np.isnan(value):
+                            if value not in maintenance_body[key]:
+                                maintenance_body[key][value] = t.freq_count
+                            else:
+                                maintenance_body[key][value] += t.freq_count
 
-            # Create the histogram for the data.
-            if optype == "data" and data_hist:
-                normalizer_hist_cache = []
+                # Create the histogram for the data.
+                if optype == "data" and data_hist:
+                    normalizer_hist_cache = []
 
-                # Forward the "data" state through the windows.
-                create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
-                normalizer_hist_cache.append((window_normalizer[cur_bucket], output_tuples[-1]))
-                cur_bucket += 1
-
-                # Apply a savings optimization since this can potentially be somewhat expensive.
-                while cur_bucket < len(query_orders):
-                    inserted = False
-                    for (normalizer, hist) in normalizer_hist_cache:
-                        if normalizer == window_normalizer[cur_bucket]:
-                            # The normalizer is the same, our inputs are the same, so just copy.
-                            hist = copy.deepcopy(hist)
-                            hist[0] = cur_bucket
-                            output_tuples.append(hist)
-                            inserted = True
-                            break
-
-                    if not inserted:
-                        # The normalizer is different, so re-compute with the new normalizer.
-                        create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
-                        normalizer_hist_cache.append((window_normalizer[cur_bucket], output_tuples[-1]))
-
+                    # Forward the "data" state through the windows.
+                    create_histograms(cur_bucket, optype, index_clause, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                    normalizer_hist_cache.append((window_normalizer[cur_bucket], output_tuples[-1]))
                     cur_bucket += 1
-            elif optype != "data":
-                create_histograms(cur_bucket, optype, maintenance_body, normalizer=window_normalizer[cur_bucket])
-                maintenance_body = {k: {} for k in att_keys}
-            pbar.update(1)
 
-    columns = ["window_index", "optype", "att_name", "key_dist"]
+                    # Apply a savings optimization since this can potentially be somewhat expensive.
+                    while cur_bucket < len(query_orders):
+                        inserted = False
+                        for (normalizer, hist) in normalizer_hist_cache:
+                            if normalizer == window_normalizer[cur_bucket]:
+                                # The normalizer is the same, our inputs are the same, so just copy.
+                                hist = copy.deepcopy(hist)
+                                hist[0] = cur_bucket
+                                output_tuples.append(hist)
+                                inserted = True
+                                break
+
+                        if not inserted:
+                            # The normalizer is different, so re-compute with the new normalizer.
+                            create_histograms(cur_bucket, optype, index_clause, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                            normalizer_hist_cache.append((window_normalizer[cur_bucket], output_tuples[-1]))
+
+                        cur_bucket += 1
+                elif optype != "data":
+                    create_histograms(cur_bucket, optype, index_clause, maintenance_body, normalizer=window_normalizer[cur_bucket])
+                    maintenance_body = {k: {} for k in att_keys}
+                pbar.update(1)
+
+        if optype == "data" or int(optype) != OpType.SELECT.value:
+            generate_histogram(optype, None, frame)
+        else:
+            generate_histogram(optype, None, frame)
+            for uval in frame.index_used.unique():
+                # Adjust the SELECT based on the index used.
+                generate_histogram(optype, uval, frame[frame.index_used == uval])
+
+    columns = ["window_index", "optype", "index_clause", "att_name", "key_dist"]
     df = pd.DataFrame(output_tuples, columns=columns)
     # Unify the optype column type as a string.
     df["optype"] = df.optype.astype(str)
@@ -416,7 +482,7 @@ def construct_keyspaces(logger, connection, work_prefix, tbls, table_attr_map, w
     return bucket_ks
 
 
-def construct_query_window_stats(logger, connection, work_prefix, tbls, window_index_map, buckets):
+def construct_query_window_stats(logger, connection, work_prefix, tbls, tbl_index_map, window_index_map, buckets):
     tbl_ks = {}
     agg_stats = [
         "num_modify_tuples",
@@ -424,6 +490,13 @@ def construct_query_window_stats(logger, connection, work_prefix, tbls, window_i
         "num_extend",
         "num_hot",
         "num_defrag",
+    ]
+
+    agg_index_stats = [
+        "num_modify_tuples",
+        "num_select_tuples",
+        "num_extend",
+        "num_split",
     ]
 
     ops = [
@@ -449,21 +522,54 @@ def construct_query_window_stats(logger, connection, work_prefix, tbls, window_i
             # The 0th window of window_index_map spans all queries between window_index_map[tbl].time[0] and .time[1].
             # Which means we need width_bucket() to return 0 for QOs betweeen time[0] and time[1].
             query_orders = [str(i) for i in window_index_map[tbl].query_order.values[1:]]
-            sql = "SELECT width_bucket(query_order, ARRAY[" + ",".join(query_orders) + "]) as window_index, "
-            sql += ",".join([f"SUM({k})" for k in agg_stats]) + ", "
-            sql += ",".join([f"SUM(CASE optype WHEN {v} THEN num_modify_tuples ELSE 0 END) AS {f}" for f, v in ops]) + ", "
-            sql += ",".join([f"SUM(CASE optype WHEN {v} THEN 1 ELSE 0 END) AS {f}" for f, v in qs]) + " "
-            sql += f"FROM {work_prefix}_mw_stats "
-            sql += f"WHERE target = '{tbl}' "
-            sql += "GROUP BY window_index"
 
-            records = []
-            result = cursor.execute(sql)
-            for r in result:
-                # This actually belongs to a window that we can use.
-                if window_index_map[tbl].iloc[r[0]].true_window_index != -1:
-                    records.append(list(r))
+            sql_format = """
+                SELECT  width_bucket(query_order, ARRAY[{query_orders}]) as window_index, {agg_stats}
+                FROM {work_prefix}_mw_stats{index}
+                WHERE target = '{tbl}'
+                GROUP BY window_index {aux_group}
+            """
 
-            tbl_ks[tbl] = pd.DataFrame(records, columns=["window_index"] + agg_stats + [f for f, _ in ops] + [f for f, _ in qs])
+            def execute_sql(sql):
+                records = []
+                result = cursor.execute(sql)
+                for r in result:
+                    # This actually belongs to a window that we can use.
+                    if window_index_map[tbl].iloc[r[0]].true_window_index != -1:
+                        records.append(list(r))
+                return records
+
+            sql = sql_format.format(
+                work_prefix=work_prefix,
+                query_orders=",".join(query_orders),
+                agg_stats=",".join(
+                    [f"SUM({k})" for k in agg_stats] +
+                    [f"SUM(CASE optype WHEN {v} THEN num_modify_tuples ELSE 0 END) AS {f}" for f, v in ops] +
+                    [f"SUM(CASE optype WHEN {v} THEN 1 ELSE 0 END) AS {f}" for f, v in qs]),
+                index="",
+                tbl=tbl,
+                aux_group="")
+            tbl_ks[tbl] = pd.DataFrame(execute_sql(sql), columns=["window_index"] + agg_stats + [f for f, _ in ops] + [f for f, _ in qs])
+
+            idx_frames = []
+            tbl_index = [tbl] + tbl_index_map[tbl]
+            for idx in tbl_index:
+                index = sql_format.format(
+                    work_prefix=work_prefix,
+                    query_orders=",".join(query_orders),
+                    agg_stats=",".join(
+                        ["target"] +
+                        [f"SUM({k})" for k in agg_index_stats] +
+                        [f"SUM(CASE optype WHEN {v} THEN num_modify_tuples ELSE 0 END) AS {f}" for f, v in ops] +
+                        [f"SUM(CASE optype WHEN {v} THEN 1 ELSE 0 END) AS {f}" for f, v in qs]),
+                    index="_index",
+                    tbl=idx,
+                    aux_group=", target")
+
+                record = execute_sql(index)
+                if len(record) > 0:
+                    idx_frames.append(pd.DataFrame(record, columns=["window_index", "target"] + agg_index_stats + [f for f, _ in ops] + [f for f, _ in qs]))
+            if len(idx_frames) > 0:
+                tbl_ks[tbl + "_index"] = pd.concat(idx_frames, ignore_index=True)
 
     return tbl_ks

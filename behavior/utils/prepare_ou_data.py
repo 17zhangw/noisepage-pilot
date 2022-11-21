@@ -162,15 +162,9 @@ def clean_input_data(df, separate_indkey_features, is_train):
     # If we're training, drop. Otherwise, execute in nodrop.
     df = prepare_index_input_data(df, nodrop=not is_train, separate_indkey_features=separate_indkey_features)
 
-    # This is an OU-specific dataframe operation. Why? Well because we want the num_outer_loops
-    # to handle the query-level "nested" behavior.
     if "IndexScan_num_outer_loops" in df.columns:
+        # Clip num_outer_loops such that it is between 1 and None.
         df["IndexScan_num_outer_loops"] = np.clip(df.IndexScan_num_outer_loops, 1, None)
-        div_cols = TARGET_COLUMNS + ["IndexScan_num_iterator_used", "IndexScan_num_heap_fetches"]
-        div_cols = [col for col in div_cols if col in df]
-        if len(div_cols) > 0:
-            df[div_cols] = df[div_cols].div(df.IndexScan_num_outer_loops, axis=0)
-            df.drop(columns=["IndexScan_num_outer_loops"], inplace=True, errors='raise')
 
     # TODO(wz2): I think we should drop state variables other than below? Why?
     # Because these are transitory and sort of capture the "end" of execution state

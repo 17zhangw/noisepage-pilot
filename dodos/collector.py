@@ -15,7 +15,7 @@ def task_collector_init():
     Collector: attach collector to a running NoisePage instance.
     """
 
-    def start_collector(benchmark, output_dir, wait_time, collector_interval, pid):
+    def start_collector(benchmark, output_dir, wait_time, collector_interval, pid, bpf_trace):
         assert pid is not None
 
         if output_dir is None:
@@ -42,6 +42,9 @@ def task_collector_init():
             "--pid",
             pid
         ]
+
+        if bpf_trace:
+            arguments += "--bpf-trace"
 
         sudo[local["python3"][arguments]].run_bg(
             # sys.stdout will actually give the doit writer. Here we need the actual
@@ -86,6 +89,12 @@ def task_collector_init():
                 "name": "pid",
                 "long": "pid",
                 "help": "Postmaster PID that we're attaching to.",
+                "default": None,
+            },
+            {
+                "name": "bpf_trace",
+                "long": "bpf_trace",
+                "help": "Whether to augment with BPF instrumentation.",
                 "default": None,
             },
         ],

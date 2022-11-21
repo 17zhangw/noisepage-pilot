@@ -2,6 +2,7 @@ import random
 from behavior import OperatingUnit
 
 def compute_buffer_page_features(ougc, query_ous):
+    # FIXME(BITMAP): Consider the buffer page usage for bitmap.
     valid_ous = {
         OperatingUnit.IndexScan.name: ("IndexScan", "IndexScan_indexid", "IndexScan_scan_est_pages_needed"),
         OperatingUnit.IndexOnlyScan.name: ("IndexOnlyScan", "IndexOnlyScan_indexid", "IndexOnlyScan_scan_est_pages_needed"),
@@ -9,8 +10,6 @@ def compute_buffer_page_features(ougc, query_ous):
         OperatingUnit.ModifyTableInsert.name: ("ModifyTableInsert", "ModifyTable_target_oid", None),
         OperatingUnit.ModifyTableUpdate.name: ("ModifyTableUpdate", "ModifyTable_target_oid", None),
         OperatingUnit.ModifyTableDelete.name: ("ModifyTableDelete", "ModifyTable_target_oid", None),
-        OperatingUnit.BitmapIndexScan.name: ("BitmapIndexScan", "BitmapIndexScan_scan_scanrelid_oid", None),
-        OperatingUnit.BitmapHeapScan.name: ("BitmapHeapScan", "BitmapHeapScan_scan_scanrelid_oid", None),
     }
 
     if ougc.buffer_page_model is not None:
@@ -85,6 +84,7 @@ def compute_buffer_access_features(ougc, query_ous, window, num_queries):
         tbl_state["total_blks_requested"] = 0
         tbl_state["total_tuples_touched"] = tbl_state["num_select_tuples"] + tbl_state["num_modify_tuples"]
 
+    # FIXME(BITMAP): Consider the buffer access for bitmap.
     valid_ous = {
         OperatingUnit.IndexScan.name: ("IndexScan", "IndexScan_indexid"),
         OperatingUnit.IndexOnlyScan.name: ("IndexOnlyScan", "IndexOnlyScan_indexid"),
@@ -92,8 +92,6 @@ def compute_buffer_access_features(ougc, query_ous, window, num_queries):
         OperatingUnit.ModifyTableInsert.name: ("ModifyTableInsert", "ModifyTable_target_oid"),
         OperatingUnit.ModifyTableUpdate.name: ("ModifyTableUpdate", "ModifyTable_target_oid"),
         OperatingUnit.ModifyTableDelete.name: ("ModifyTableDelete", "ModifyTable_target_oid"),
-        OperatingUnit.BitmapIndexScan.name: ("BitmapIndexScan", "BitmapIndexScan_scan_scanrelid_oid"),
-        OperatingUnit.BitmapHeapScan.name: ("BitmapHeapScan", "BitmapHeapScan_scan_scanrelid_oid"),
     }
 
     for ou in query_ous:

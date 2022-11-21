@@ -89,6 +89,22 @@ BENCHDB_TO_TABLES = {
     "ycsb": ["usertable"],
 }
 
+BENCHDB_TO_INDEX = {
+    "tpcc": [
+        "warehouse_pkey",
+        "district_pkey",
+        "item_pkey",
+        "new_order_pkey",
+        "oorder_pkey",
+        "customer_pkey",
+        "stock_pkey",
+        "order_line_pkey",
+        "idx_customer_name",
+        "idx_order",
+        "oorder_o_w_id_o_d_id_o_c_id_o_id_key",
+    ],
+}
+
 
 # This list must be kept up to date with the OU definitions in cmu-db/postgres.
 class OperatingUnit(Enum):
