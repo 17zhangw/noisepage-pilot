@@ -322,7 +322,7 @@ def __gen_data_page_features(input_dir, engine, connection, work_prefix, wa, buc
                 v = v.query_order.values
 
             # Truncate off the first value; this is because we want queries that span [t=0, t=1] to be assigned window 0.
-            sql = DATA_PAGES_QUERY.format(work_prefix=work_prefix, values=",".join([str(i) for i in v[1:]]), addt_filter=" AND (s.target = '{t}')")
+            sql = DATA_PAGES_QUERY.format(work_prefix=work_prefix, values=",".join([str(i) for i in v[1:]]), addt_filter=f" AND (s.target = '{t}')")
             logger.info("Executing SQL: %s", sql)
             result = connection.execute(sql)
             logger.info("Extracted data returned %s", result.rowcount)

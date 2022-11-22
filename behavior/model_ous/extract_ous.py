@@ -342,14 +342,14 @@ def load_metadata(connection, engine, data_dir, work_prefix, plans_df):
         connection.execute(f"CREATE INDEX {work_prefix}_md_plans_0 ON {work_prefix}_md_plans(query_id, generation, db_id, pid, plan_node_id, statement_timestamp)")
         connection.execute(f"ALTER TABLE {work_prefix}_md_plans ALTER COLUMN features TYPE json USING features::json")
 
-        connection.execute(f"CREATE INDEX {work_prefix}_md_pg_class_indexes_0 ON {work_prefix}_md_pg_class_indexes (oid)")
-        connection.execute(f"CREATE INDEX {work_prefix}_md_pg_index_0 ON {work_prefix}_md_pg_index (indexrelid)")
+        connection.execute(f"CREATE UNIQUE INDEX {work_prefix}_md_pg_class_indexes_0 ON {work_prefix}_md_pg_class_indexes (oid, unix_timestamp)")
+        connection.execute(f"CREATE UNIQUE INDEX {work_prefix}_md_pg_index_0 ON {work_prefix}_md_pg_index (indexrelid, unix_timestamp)")
         connection.execute(f"ALTER TABLE {work_prefix}_md_pg_index ALTER COLUMN indkey TYPE int2vector USING indkey::int2vector")
 
-        connection.execute(f"CREATE INDEX {work_prefix}_md_pg_attribute_0 ON {work_prefix}_md_pg_attribute (attrelid, attnum)")
-        connection.execute(f"CREATE INDEX {work_prefix}_md_pg_stats_0 ON {work_prefix}_md_pg_stats (tablename, attname)")
-        connection.execute(f"CREATE INDEX {work_prefix}_md_pg_settings_0 ON {work_prefix}_md_pg_settings (unix_timestamp)")
-        connection.execute(f"CREATE INDEX {work_prefix}_md_pg_class_tables_0 ON {work_prefix}_md_pg_class_tables (oid, unix_timestamp)")
+        connection.execute(f"CREATE UNIQUE INDEX {work_prefix}_md_pg_attribute_0 ON {work_prefix}_md_pg_attribute (attrelid, attnum, unix_timestamp)")
+        connection.execute(f"CREATE UNIQUE INDEX {work_prefix}_md_pg_stats_0 ON {work_prefix}_md_pg_stats (tablename, attname, unix_timestamp)")
+        connection.execute(f"CREATE UNIQUE INDEX {work_prefix}_md_pg_settings_0 ON {work_prefix}_md_pg_settings (unix_timestamp)")
+        connection.execute(f"CREATE UNIQUE INDEX {work_prefix}_md_pg_class_tables_0 ON {work_prefix}_md_pg_class_tables (oid, unix_timestamp)")
 
         connection.execute(f"CLUSTER {work_prefix}_md_pg_class_indexes USING {work_prefix}_md_pg_class_indexes_0")
         connection.execute(f"CLUSTER {work_prefix}_md_pg_index USING {work_prefix}_md_pg_index_0")
@@ -381,7 +381,7 @@ def load_metadata(connection, engine, data_dir, work_prefix, plans_df):
         create_view += f"SELECT tbls.* FROM {work_prefix}_md_pg_class_tables tbls "
         create_view += """
                  WHERE idx.indrelid = tbls.oid
-                   AND cls_idx.unix_timestamp >= idx.unix_timestamp
+                   AND cls_idx.unix_timestamp >= tbls.unix_timestamp
               ORDER BY tbls.unix_timestamp DESC LIMIT 1
             ) tbls,
         """
