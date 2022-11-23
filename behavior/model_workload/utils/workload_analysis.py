@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 from psycopg.rows import dict_row
 from behavior.model_workload.utils import OpType
-from behavior.utils import read_all_plans
+from behavior.utils.process_raw_plans import process_raw_plans, extract_tbl_col_pair
 
 class WorkloadAnalysis:
     # table_attr_map defines all attributes that might exist per table.
@@ -118,161 +118,6 @@ def process_schemas(connection, input_dir, workload_only, tables):
     return table_attr_map, reloid_table_map, table_index_map, table_keyspace_map, indexoid_table_map, indexoid_name_map
 
 
-def process_plans(input_dir, table_attr_map, indexoid_table_map, indexoid_name_map):
-    # Process all the plans to get the query text.
-    pg_qss_plans = read_all_plans(input_dir)
-    pg_qss_plans = pg_qss_plans[pg_qss_plans.query_id != 0]
-    pg_qss_plans["query_text"] = ""
-    pg_qss_plans["target"] = ""
-    pg_qss_plans["num_rel_refs"] = 0
-    pg_qss_plans["optype"] = 0
-    pg_qss_plans["limit"] = 0
-    pg_qss_plans["orderby"] = ""
-    for plan in pg_qss_plans.itertuples():
-        feature = json.loads(plan.features)
-        query_text = feature[0]["query_text"].lower().rstrip()
-
-        target = ""
-        num_rel_refs = 0
-        optype = 0
-        limit = 0
-        orderbys = []
-        if query_text is not None:
-            root = pglast.Node(pglast.parse_sql(query_text))
-
-            # First construct all the table aliases.
-            alias_tbl_map = {}
-            for node in root.traverse():
-                if isinstance(node, pglast.node.Node):
-                    if isinstance(node.ast_node, pglast.ast.RangeVar):
-                        # Parse the alias map.
-                        if node.ast_node.alias is not None:
-                            alias_tbl_map[node.ast_node.alias.aliasname] = node.ast_node.relname
-                        alias_tbl_map[node.ast_node.relname] = node.ast_node.relname
-
-            for node in root.traverse():
-                if isinstance(node, pglast.node.Node):
-                    if isinstance(node.ast_node, pglast.ast.InsertStmt):
-                        assert num_rel_refs == 0
-                        target = node.ast_node.relation.relname
-                        num_rel_refs = 1
-                        optype = OpType.INSERT.value
-                    elif isinstance(node.ast_node, pglast.ast.UpdateStmt):
-                        assert num_rel_refs == 0
-                        target = node.ast_node.relation.relname
-                        num_rel_refs = 1
-                        optype = OpType.UPDATE.value
-                    elif isinstance(node.ast_node, pglast.ast.DeleteStmt):
-                        assert num_rel_refs == 0
-                        target = node.ast_node.relation.relname
-                        num_rel_refs = 1
-                        optype = OpType.DELETE.value
-                    elif isinstance(node.ast_node, pglast.ast.SelectStmt) and node.ast_node.fromClause is not None:
-                        optype = OpType.SELECT.value
-                        for n in node.ast_node.fromClause:
-                            if isinstance(n, pglast.ast.RangeVar):
-                                num_rel_refs = num_rel_refs + 1
-                                if len(target) == 0:
-                                    target = n.relname
-                                else:
-                                    target = target + "," + n.relname
-
-                        if node.ast_node.limitCount:
-                            limit = node.ast_node.limitCount.val.val
-
-                        if node.ast_node.sortClause:
-                            for n in node.ast_node.sortClause:
-                                sort = "DESC" if n.sortby_dir == pglast.enums.parsenodes.SortByDir.SORTBY_DESC else "ASC"
-                                if isinstance(n.node, pglast.ast.ColumnRef):
-                                    tbl, col = extract_tbl_col_pair(alias_tbl_map, table_attr_map, n.node.fields)
-                                    orderbys.append(f"{tbl} {col} {sort}")
-
-        for query in QUERY_CONTENT_BLOCK:
-            if query_text is not None and query in query_text:
-                query_text = None
-        pg_qss_plans.at[plan.Index, "query_text"] = query_text
-        pg_qss_plans.at[plan.Index, "num_rel_refs"] = num_rel_refs
-        pg_qss_plans.at[plan.Index, "target"] = target
-        pg_qss_plans.at[plan.Index, "optype"] = optype
-        pg_qss_plans.at[plan.Index, "limit"] = limit
-        pg_qss_plans.at[plan.Index, "orderby"] = ",".join(orderbys)
-
-    new_df_tuples = []
-    for row in pg_qss_plans.itertuples():
-        feature = json.loads(row.features)
-        if row.query_text is not None:
-            def construct_plan_tuple(row, plan, target_idx_scan_table, target_idx_scan):
-                new_tuple = {
-                    'query_id': row.query_id,
-                    'generation': row.generation,
-                    'db_id': row.db_id,
-                    'pid': row.pid,
-                    'statement_timestamp': row.statement_timestamp,
-                    'plan_node_id': -1 if plan is None else plan["plan_node_id"],
-
-                    'left_child_node_id': plan["left_child_node_id"] if plan is not None and "left_child_node_id" in plan else -1,
-                    'right_child_node_id': plan["right_child_node_id"] if plan is not None and "right_child_node_id" in plan else -1,
-                    'total_cost': 0 if plan is None else plan["total_cost"],
-                    'startup_cost': 0 if plan is None else plan["startup_cost"],
-
-                    'query_text': row.query_text,
-                    'num_rel_refs': row.num_rel_refs,
-                    'target': row.target,
-                    'target_idx_scan_table': target_idx_scan_table,
-                    'target_idx_scan': target_idx_scan,
-                    'optype': row.optype,
-                    'limit': row.limit,
-                    'orderby': row.orderby,
-                }
-                new_df_tuples.append(new_tuple)
-
-            # We have a valid plan.
-            def process_plan(plan):
-                for key, value in plan.items():
-                    if key == "Plans":
-                        # For the special key, we recurse into the child.
-                        for p in value:
-                            process_plan(p)
-                        continue
-
-                # Directly try and yoink the relevant feature.
-                col = "IndexScan_indexid" if "IndexScan_indexid" in plan else "IndexOnlyScan_indexid"
-                target_idx_scan_table = None
-                target_idx_scan = None
-                if col in plan and plan[col] in indexoid_table_map:
-                    target_idx_scan_table = indexoid_table_map[plan[col]]
-                    target_idx_scan = indexoid_name_map[plan[col]]
-                construct_plan_tuple(row, plan, target_idx_scan_table, target_idx_scan)
-
-            # Let's append one for the -1. So we actually have something to match on to populate useful data.
-            construct_plan_tuple(row, None, None, None)
-
-            # Generate the plan tuples.
-            process_plan(json.loads(row.features)[0])
-
-    new_df_tuples = pd.DataFrame(new_df_tuples)
-    new_df_tuples.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
-    new_df_tuples.sort_index(axis=0, inplace=True)
-    return new_df_tuples
-
-
-def extract_tbl_col_pair(alias_tbl_map, table_attr_map, columnref):
-    tbl = None
-    val = None
-    if len(columnref) == 2:
-        alias = columnref[0].val
-        if alias in alias_tbl_map:
-            tbl = alias_tbl_map[alias]
-        val = columnref[1].val
-    else:
-        for t in alias_tbl_map:
-            if t in table_attr_map and columnref[0].val in table_attr_map[t]:
-                tbl = t
-                break
-        val = columnref[0].val
-    return tbl, val
-
-
 def process_query_templates(pg_qss_plans, table_attr_map):
     # Process each query and extract useful parameters w.r.t to INDEX keyspaces.
     query_template_map = {}
@@ -354,7 +199,9 @@ def workload_analysis(connection, input_dir, workload_only, tables):
     table_attr_map, reloid_table_map, table_index_map, table_keyspace_map, indexoid_table_map, indexoid_name_map = process_schemas(connection, input_dir, workload_only, tables)
 
     # Process the plans.
-    pg_qss_plans = process_plans(input_dir, table_attr_map, indexoid_table_map, indexoid_name_map)
+    pg_qss_plans = process_raw_plans(None, input_dir, QUERY_CONTENT_BLOCK, False, table_attr_map, indexoid_table_map, indexoid_name_map)
+    pg_qss_plans.set_index(keys=["statement_timestamp"], drop=True, append=False, inplace=True)
+    pg_qss_plans.sort_index(axis=0, inplace=True)
 
     # This processes a mapping from query template -> ($1 -> "...").
     # As such, we identify a map from argument key to argument value per query template.
