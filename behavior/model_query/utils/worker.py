@@ -70,13 +70,13 @@ def prepare_metadata(target_conn, state):
         for record in result_cls:
             if "relname" in record and (record["relname"] in table_feature_state):
                 relname = record["relname"]
-                record["reltuples"] = table_feature_state[relname]["approx_tuple_count"]
+                record["reltuples"] = table_feature_state[relname]["tuple_count"]
                 record["relpages"] = table_feature_state[relname]["num_pages"]
                 record["time"] = (state.window_index) * 1.0 * 1e6
                 pg_class_total.append(copy.deepcopy(record))
 
             if record["oid"] in index_feature_state:
-                record["reltuples"] = index_feature_state[record["oid"]]["approx_tuple_count"]
+                record["reltuples"] = index_feature_state[record["oid"]]["tuple_count"]
                 record["relpages"] = index_feature_state[record["oid"]]["num_pages"]
                 record["time"] = (state.window_index) * 1.0 * 1e6
                 pg_class_total.append(copy.deepcopy(record))
@@ -87,7 +87,7 @@ def prepare_metadata(target_conn, state):
                 entry = copy.deepcopy(record)
                 entry.pop("relname")
                 # Install the stats that we are convinced should be correct.
-                entry["reltuples"] = index_feature_state[record["indexrelid"]]["approx_tuple_count"]
+                entry["reltuples"] = index_feature_state[record["indexrelid"]]["tuple_count"]
                 entry["relpages"] = index_feature_state[record["indexrelid"]]["num_pages"]
                 entry["time"] = (state.window_index) * 1.0 * 1e6
                 pg_index_total.append(entry)
@@ -183,7 +183,7 @@ def implant_stats_to_postgres(target_conn, ougc):
     target_conn.execute("SELECT qss_clear_stats()", prepare=False)
     def implant_stat(name, data):
         relpages = int(data["num_pages"])
-        reltuples = data["approx_tuple_count"]
+        reltuples = data["tuple_count"]
 
         # FIXME(INDEX): This is a back of the envelope estimation for the index height.
         height = 0

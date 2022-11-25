@@ -248,7 +248,7 @@ def main(benchmark, outdir, collector_interval, pid, bpf_trace):
     # Augment with pgstattuple_approx data.
     tables = BENCHDB_TO_TABLES[benchmark]
     for tbl in tables:
-        PG_COLLECTOR_TARGETS[tbl] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstattuple_approx('{tbl}');"
+        PG_COLLECTOR_TARGETS[tbl] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstattuple('{tbl}');"
     for idx in BENCHDB_TO_INDEX[benchmark]:
         PG_COLLECTOR_TARGETS[idx] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstatindex('{idx}');"
 

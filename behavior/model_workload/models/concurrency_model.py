@@ -293,7 +293,7 @@ class ConcurrencyModel(nn.Module):
 
         tbl_mapping = {t:i for i, t in enumerate(table_attr_map)}
         norm_relpages = self.relpages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_mapping]).reshape(-1, 1))
-        norm_reltuples = self.reltuples_scaler.transform(np.array([table_state[t]["approx_tuple_count"] for t in tbl_mapping]).reshape(-1, 1))
+        norm_reltuples = self.reltuples_scaler.transform(np.array([table_state[t]["tuple_count"] for t in tbl_mapping]).reshape(-1, 1))
         norm_mpi = self.mpi_scaler.transform(np.array([mpi]).reshape(-1, 1))
         for t, tbl_state in table_state.items():
             tbl_state["norm_relpages"] = norm_relpages[tbl_mapping[t]][0]
@@ -452,7 +452,7 @@ class AutoMLConcurrencyModel():
         tbl_mapping = {t:i for i, t in enumerate(table_attr_map)}
         for _, tbl_state in table_state.items():
             tbl_state["norm_relpages"] = tbl_state["num_pages"]
-            tbl_state["norm_reltuples"] = tbl_state["approx_tuple_count"]
+            tbl_state["norm_reltuples"] = tbl_state["tuple_count"]
 
         inputs = []
         hist = self.model_args.hist_width

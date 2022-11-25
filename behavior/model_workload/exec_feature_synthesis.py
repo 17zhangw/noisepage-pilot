@@ -184,7 +184,7 @@ def build_window_indexes(connection, work_prefix, input_dir, tables, all_targets
     pg_stat_user_tables["autovacuum_unix_timestamp"] = pd.to_datetime(pg_stat_user_tables.last_autovacuum).map(pd.Timestamp.timestamp)
 
     with connection.transaction() as tx:
-        connection.execute(f"CREATE INDEX {work_prefix}_mw_queries_args_time ON {work_prefix}_mw_queries_args (unix_timestamp)")
+        connection.execute(f"CREATE INDEX {work_prefix}_mw_queries_args_time ON {work_prefix}_mw_queries_args (query_order, unix_timestamp)")
         for tbl in tables:
             logger.info("Computing window index map for table: %s", tbl)
             sample = pd.read_csv(f"{input_dir}/{tbl}.csv")

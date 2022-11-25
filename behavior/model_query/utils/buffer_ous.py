@@ -30,7 +30,7 @@ def compute_buffer_page_features(ougc, query_ous):
             frame.append({
                 "comment": comment,
                 "relpages": table_state["num_pages"],
-                "reltuples": table_state["approx_tuple_count"],
+                "reltuples": table_state["tuple_count"],
             })
         inference_pages = ougc.buffer_page_model.inference(frame)
     else:

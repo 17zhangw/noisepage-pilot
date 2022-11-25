@@ -118,15 +118,16 @@ def load_initial_data(logger, connection, workload_only, work_prefix, input_dir,
                 installed_ks.add(tuple(ks))
                 cnt += 1
 
-            if tbl in table_attr_map:
-                for k in table_attr_map[tbl]:
-                    # Build it on the single tuple too if needed.
-                    if tuple([k]) not in installed_ks:
-                        sql = f"CREATE INDEX {work_prefix}_{tbl}_{cnt} ON {work_prefix}_{tbl} ({k}, insert_version)"
-                        logger.info("Executing SQL: %s", sql)
-                        connection.execute(sql)
-                        installed_ks.add(tuple(k))
-                        cnt += 1
+                for i in range(1, len(ks)):
+                    if tuple(ks[:i]) in installed_ks:
+                        continue
+
+                    sql = f"CREATE INDEX {work_prefix}_{tbl}_{cnt} ON {work_prefix}_{tbl} ("
+                    sql += ",".join(ks[:i]) + ", insert_version)"
+                    logger.info("Executing SQL: %s", sql)
+                    connection.execute(sql)
+                    installed_ks.add(tuple(ks[:i]))
+                    cnt += 1
 
             connection.execute(f"CREATE INDEX {work_prefix}_{tbl}_iv ON {work_prefix}_{tbl} (insert_version)")
 
@@ -299,7 +300,7 @@ def probe_single(logger, connection, work_prefix, wa, datatypes, query, qid, que
     # FIXME(BITMAP): Support resolving bitmap index scan use.
     idx_use_join = """
         LEFT JOIN LATERAL (SELECT query_order, target_idx_scan FROM {work_prefix}_mw_queries q WHERE
-                                                a.query_id = q.query_id AND q.target = '{query_tbl}' AND
+                                                a.query_id = q.query_id AND
                                                 a.query_order = q.query_order AND
                                                 q.comment IN ('IndexScan', 'IndexOnlyScan') AND
                                                 q.target_idx_scan_table = '{target}' AND

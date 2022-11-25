@@ -231,7 +231,7 @@ class BufferAccessModel(nn.Module):
     def inference(self, window_slot, num_queries, sb_bytes, table_state, table_attr_map, keyspace_feat_space):
         tbl_mapping = {t:i for i, t in enumerate(table_attr_map)}
         norm_relpages = self.relpages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_mapping]).reshape(-1, 1))
-        norm_reltuples = self.reltuples_scaler.transform(np.array([table_state[t]["approx_tuple_count"] for t in tbl_mapping]).reshape(-1, 1))
+        norm_reltuples = self.reltuples_scaler.transform(np.array([table_state[t]["tuple_count"] for t in tbl_mapping]).reshape(-1, 1))
 
         global_blks_requested = 0
         for tbl, i in tbl_mapping.items():
@@ -347,7 +347,7 @@ class AutoMLBufferAccessModel():
         global_blks_requested = 0
         for _, tbl_state in table_state.items():
             tbl_state["norm_relpages"] = tbl_state["num_pages"]
-            tbl_state["norm_reltuples"] = tbl_state["approx_tuple_count"]
+            tbl_state["norm_reltuples"] = tbl_state["tuple_count"]
             global_blks_requested += tbl_state["total_blks_requested"]
 
         key_bias, key_dists, masks, all_bias, addt_feats = extract_infer_tables_keys_features(self.model_args,

@@ -50,7 +50,7 @@ FROM (
         SUM(CASE b.comment WHEN 'ModifyTableIndexInsert' THEN b.counter1 ELSE 0 END) OVER w AS num_extend,
         SUM(CASE b.comment WHEN 'ModifyTableIndexInsert' THEN b.counter2 ELSE 0 END) OVER w as num_split
         FROM {work_prefix}_mw_queries_args a
-        LEFT JOIN {work_prefix}_mw_queries b ON a.query_order = b.query_order AND b.plan_node_id != -1
+        LEFT JOIN LATERAL (SELECT * FROM {work_prefix}_mw_queries b WHERE a.query_order = b.query_order AND b.plan_node_id != -1) b ON a.query_order = b.query_order
         WHERE a.target = '{target}'
         WINDOW w AS (PARTITION BY a.query_order, b.payload)
 ) s
@@ -136,7 +136,7 @@ TABLE_EXEC_FEATURES_QUERY = """
 			    ELSE 0 END) OVER w AS num_defrag
 
         FROM {work_prefix}_mw_queries_args a
-        LEFT JOIN {work_prefix}_mw_queries b ON a.query_order = b.query_order AND b.plan_node_id != -1
+        LEFT JOIN LATERAL (SELECT * FROM {work_prefix}_mw_queries b WHERE a.query_order = b.query_order AND b.plan_node_id != -1) b ON a.query_order = b.query_order
         WHERE a.target = '{target}'
         WINDOW w AS (PARTITION BY a.query_order, b.target_idx_scan_table)
     ) s

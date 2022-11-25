@@ -81,7 +81,7 @@ def extract_infer_tables_keys_features(model_args, window_slot, all_requested, t
         addt_feats[tbl_mapping[tbl], 1] = state["norm_reltuples"]
         if add_nonnorm:
             addt_feats[tbl_mapping[tbl], 2] = state["num_pages"]
-            addt_feats[tbl_mapping[tbl], 3] = state["approx_tuple_count"]
+            addt_feats[tbl_mapping[tbl], 3] = state["tuple_count"]
 
         if tbl in keyspace_feat_space:
             window_df = keyspace_feat_space[tbl]

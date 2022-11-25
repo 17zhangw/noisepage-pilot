@@ -67,8 +67,8 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
     if model_args.add_nonnorm_features:
         num_inputs += len(MODEL_WORKLOAD_NONNORM_INPUTS)
     input_args = np.zeros(num_inputs)
-    input_args[0] = input_row.approx_free_percent / 100.0
-    input_args[1] = input_row.dead_tuple_percent / 100.0
+    input_args[0] = input_row.free_percent / 100.0
+    input_args[1] = input_row.tuple_percent / 100.0
     input_args[2] = input_row.norm_num_pages
     input_args[3] = input_row.norm_tuple_count
     input_args[4] = input_row.norm_tuple_len_avg
@@ -129,8 +129,8 @@ def generate_dataset(logger, model_args, automl=False):
         globs = [all_files.extend([f for f in glob.glob(f"{d}/exec_features/windows/*.feather")]) for d in model_args.input_dirs]
         data = pd.concat(map(pd.read_feather, all_files))
         data["num_pages"] = data.table_len / 8192.0
-        data["tuple_len_avg"] = data.table_len / data.approx_tuple_count
-        return MinMaxScaler().fit(data.num_pages.values.reshape(-1, 1)), MinMaxScaler().fit(data.approx_tuple_count.values.reshape(-1, 1)), MinMaxScaler().fit(data.tuple_len_avg.values.reshape(-1, 1))
+        data["tuple_len_avg"] = data.table_len / data.tuple_count
+        return MinMaxScaler().fit(data.num_pages.values.reshape(-1, 1)), MinMaxScaler().fit(data.tuple_count.values.reshape(-1, 1)), MinMaxScaler().fit(data.tuple_len_avg.values.reshape(-1, 1))
 
     if not automl:
         (Path(model_args.dataset_path)).mkdir(parents=True, exist_ok=True)
@@ -154,14 +154,14 @@ def generate_dataset(logger, model_args, automl=False):
             data = pd.read_feather(input_file)
             windows = pd.read_feather(f"{d}/exec_features/windows/{root}.feather")
             windows["num_pages"] = windows.table_len / 8192.0
-            windows["tuple_len_avg"] = windows.table_len / windows.approx_tuple_count
+            windows["tuple_len_avg"] = windows.table_len / windows.tuple_count
             if not automl:
                 windows["norm_num_pages"] = num_pages_scaler.transform(windows.num_pages.values.reshape(-1, 1))
-                windows["norm_tuple_count"] = tuple_count_scaler.transform(windows.approx_tuple_count.values.reshape(-1, 1))
+                windows["norm_tuple_count"] = tuple_count_scaler.transform(windows.tuple_count.values.reshape(-1, 1))
                 windows["norm_tuple_len_avg"] = tuple_len_avg_scaler.transform(windows.tuple_len_avg.values.reshape(-1, 1))
             else:
                 windows["norm_num_pages"] = windows.num_pages
-                windows["norm_tuple_count"] = windows.approx_tuple_count
+                windows["norm_tuple_count"] = windows.tuple_count
                 windows["norm_tuple_len_avg"] = windows.tuple_len_avg
 
             data.set_index(keys=["window_index"], inplace=True)
@@ -312,7 +312,7 @@ class TableFeatureModel(nn.Module):
 
         tbl_keys = [t for t in table_state]
         norm_num_pages = self.num_pages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_keys]).reshape(-1, 1))
-        norm_tuple_count = self.tuple_count_scaler.transform(np.array([table_state[t]["approx_tuple_count"] for t in tbl_keys]).reshape(-1, 1))
+        norm_tuple_count = self.tuple_count_scaler.transform(np.array([table_state[t]["tuple_count"] for t in tbl_keys]).reshape(-1, 1))
         norm_tuple_len_avg = self.tuple_len_avg_scaler.transform(np.array([table_state[t]["tuple_len_avg"] for t in tbl_keys]).reshape(-1, 1))
         for i, t in enumerate(tbl_keys):
             table_state[t]["norm_num_pages"] = norm_num_pages[i][0]
@@ -363,7 +363,7 @@ class AutoMLTableFeatureModel():
         hist = model_args.hist_width
         for i in range(len(global_args)):
             input_row = {
-                "approx_free_percent": global_args[i][0],
+                "free_percent": global_args[i][0],
                 "dead_tuple_percent": global_args[i][1],
                 "norm_num_pages": global_args[i][2],
                 "norm_tuple_count": global_args[i][3],
@@ -420,7 +420,7 @@ class AutoMLTableFeatureModel():
         tbl_keys = [t for t in table_state]
         for i, t in enumerate(tbl_keys):
             table_state[t]["norm_num_pages"] = table_state[t]["num_pages"]
-            table_state[t]["norm_tuple_count"] = table_state[t]["approx_tuple_count"]
+            table_state[t]["norm_tuple_count"] = table_state[t]["tuple_count"]
             table_state[t]["norm_tuple_len_avg"] = table_state[t]["tuple_len_avg"]
             df = None
             if t in keyspace_feat_space:
@@ -429,7 +429,7 @@ class AutoMLTableFeatureModel():
 
             input_args, dist_scalers, key_dists, masks = generate_point_input(self.model_args, Map(table_state[t]), df, table_attr_map[t], table_state[t]["target_ff"])
             input_row = {
-                "approx_free_percent": input_args[0],
+                "free_percent": input_args[0],
                 "dead_tuple_percent": input_args[1],
                 "norm_num_pages": input_args[2],
                 "norm_tuple_count": input_args[3],

@@ -95,7 +95,7 @@ def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_onl
         query = f"CREATE UNLOGGED TABLE {work_prefix}_mw_queries WITH (autovacuum_enabled = OFF) AS "
         query += f"select *, dense_rank() over (order by statement_timestamp, pid) query_order from {work_prefix}_mw_diff order by query_order;"
         connection.execute(query)
-        connection.execute(f"CREATE INDEX {work_prefix}_mw_queries_0 ON {work_prefix}_mw_queries (query_order, plan_node_id)")
+        connection.execute(f"CREATE INDEX {work_prefix}_mw_queries_0 ON {work_prefix}_mw_queries (query_order, plan_node_id) INCLUDE (comment, target_idx_scan, target_idx_scan_table)")
         connection.execute(f"DROP TABLE {work_prefix}_mw_diff")
     connection.execute(f"VACUUM ANALYZE {work_prefix}_mw_queries")
 
@@ -136,9 +136,6 @@ def load_workload(connection, work_prefix, input_dir, pg_qss_plans, workload_onl
 
         query = f"CREATE INDEX {work_prefix}_mw_queries_args_0 ON {work_prefix}_mw_queries_args (query_order, plan_node_id) INCLUDE ("
         query += ",".join([f"arg{i+1}" for i in range(max_arg)]) + ")"
-        connection.execute(query)
-
-        query = f"CREATE INDEX {work_prefix}_mw_queries_args_1 ON {work_prefix}_mw_queries_args (query_order, unix_timestamp)"
         connection.execute(query)
 
     logger.info("Finished loading queries in query order.")

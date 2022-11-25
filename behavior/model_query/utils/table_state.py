@@ -71,10 +71,10 @@ def initial_table_feature_state(target_conn, ougc):
             oid_table_map[pgc_record["oid"]] = tbl
             table_feature_state[tbl] = {
                 "num_pages": result["table_len"] / 8192.0,
-                "approx_free_percent": result["approx_free_percent"],
+                "free_percent": result["free_percent"],
                 "dead_tuple_percent": result["dead_tuple_percent"],
-                "approx_tuple_count": result["approx_tuple_count"],
-                "tuple_len_avg": result["approx_tuple_len"] / result["approx_tuple_count"],
+                "tuple_count": result["tuple_count"],
+                "tuple_len_avg": result["tuple_len"] / result["tuple_count"],
                 "target_ff": ff,
             }
     ougc.table_feature_state = table_feature_state
@@ -108,7 +108,7 @@ def resolve_index_feature_state(target_conn, ougc):
                     new_index_feature_state[indexrelid] = {
                         "indexname": indname,
                         "num_pages": result["table_len"] / 8192.0,
-                        "approx_tuple_count": result["tuple_count"],
+                        "tuple_count": result["tuple_count"],
                         "tuple_len_avg": 0.0 if result["tuple_count"] == 0 else result["tuple_len"] / result["tuple_count"],
                         "num_inserts": 0,
                     }
@@ -181,9 +181,9 @@ def compute_next_window_state(ougc):
     # These values are all computed in expectation.
     for tbl, tbl_state in ougc.table_feature_state.items():
         # Modify the estimated tuple count by # insert and # delete.
-        tbl_state["approx_tuple_count"] += tbl_state["num_insert_tuples"]
-        tbl_state["approx_tuple_count"] -= tbl_state["num_delete_tuples"]
-        tbl_state["approx_tuple_count"] = max(0, tbl_state["approx_tuple_count"])
+        tbl_state["tuple_count"] += tbl_state["num_insert_tuples"]
+        tbl_state["tuple_count"] -= tbl_state["num_delete_tuples"]
+        tbl_state["tuple_count"] = max(0, tbl_state["tuple_count"])
 
         ins_update = tbl_state["num_update_tuples"] - floor(tbl_state["num_update_tuples"] * tbl_state["hot_percent"])
         ins_insert = tbl_state["num_insert_tuples"]
@@ -193,7 +193,7 @@ def compute_next_window_state(ougc):
             if relname == tbl:
                 idx_state = ougc.index_feature_state[indexoid]
                 for _ in range(ins_insert + ins_update):
-                    idx_state["approx_tuple_count"] += 1
+                    idx_state["tuple_count"] += 1
                     idx_state["num_pages"] += mutate_index_state_will_extend(idx_state)
 
     # FIXME(VACUUM): Without a VACUUM model or some analytical setup, we can't wipe the dead tuple percents out.
@@ -202,7 +202,7 @@ def compute_next_window_state(ougc):
     for tbl, tbl_state in ougc.table_feature_state.items():
         new_dead_tuples = prev_dead_tuples[tbl] + tbl_state["num_delete_tuples"] + tbl_state["num_update_tuples"]
         est_dead_tuple_percent = new_dead_tuples * tbl_state["tuple_len_avg"] / (tbl_state["num_pages"] * 8192.0)
-        est_free_tuple_percent = max(0.0, min(1.0, 1 - (tbl_state["approx_tuple_count"] + new_dead_tuples) * tbl_state["tuple_len_avg"] / (tbl_state["num_pages"] * 8192.0)))
+        est_free_tuple_percent = max(0.0, min(1.0, 1 - (tbl_state["tuple_count"] + new_dead_tuples) * tbl_state["tuple_len_avg"] / (tbl_state["num_pages"] * 8192.0)))
         # Adjust these to be from 0-100%
         tbl_state["dead_tuple_percent"] = max(0.0, min(1.0, est_dead_tuple_percent)) * 100.0
-        tbl_state["approx_free_percent"] = est_free_tuple_percent * 100.0
+        tbl_state["free_percent"] = est_free_tuple_percent * 100.0
