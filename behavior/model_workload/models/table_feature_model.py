@@ -68,7 +68,7 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
         num_inputs += len(MODEL_WORKLOAD_NONNORM_INPUTS)
     input_args = np.zeros(num_inputs)
     input_args[0] = input_row.free_percent / 100.0
-    input_args[1] = input_row.tuple_percent / 100.0
+    input_args[1] = input_row.dead_tuple_percent / 100.0
     input_args[2] = input_row.norm_num_pages
     input_args[3] = input_row.norm_tuple_count
     input_args[4] = input_row.norm_tuple_len_avg
