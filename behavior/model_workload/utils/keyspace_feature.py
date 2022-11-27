@@ -21,6 +21,7 @@ INDEX_EXEC_FEATURES = [
     ("target", "text"),
     ("num_modify_tuples", "int"),
     ("num_select_tuples", "int"),
+    ("num_inserts", "int"),
     ("num_extend", "int"),
     ("num_split", "int"),
 ]
@@ -48,7 +49,8 @@ FROM (
         SUM(CASE b.comment WHEN 'ModifyTableInsert' THEN 1 WHEN 'ModifyTableUpdate' THEN b.counter8 WHEN 'ModifyTableDelete' THEN b.counter5 ELSE 0 END) OVER w AS num_modify_tuples,
         SUM(CASE b.comment WHEN 'IndexScan' THEN b.counter0 WHEN 'IndexOnlyScan' THEN b.counter0 ELSE 0 END) OVER w AS num_select_tuples,
         SUM(CASE b.comment WHEN 'ModifyTableIndexInsert' THEN b.counter1 ELSE 0 END) OVER w AS num_extend,
-        SUM(CASE b.comment WHEN 'ModifyTableIndexInsert' THEN b.counter2 ELSE 0 END) OVER w as num_split
+        SUM(CASE b.comment WHEN 'ModifyTableIndexInsert' THEN b.counter2 ELSE 0 END) OVER w as num_split,
+        SUM(CASE b.comment WHEN 'ModifyTableIndexInsert' THEN 1 ELSE 0 END) OVER w as num_inserts
         FROM {work_prefix}_mw_queries_args a
         LEFT JOIN LATERAL (SELECT * FROM {work_prefix}_mw_queries b WHERE a.query_order = b.query_order AND b.plan_node_id != -1) b ON a.query_order = b.query_order
         WHERE a.target = '{target}'
@@ -495,6 +497,7 @@ def construct_query_window_stats(logger, connection, work_prefix, tbls, tbl_inde
     agg_index_stats = [
         "num_modify_tuples",
         "num_select_tuples",
+        "num_inserts",
         "num_extend",
         "num_split",
     ]
@@ -558,7 +561,7 @@ def construct_query_window_stats(logger, connection, work_prefix, tbls, tbl_inde
                     work_prefix=work_prefix,
                     query_orders=",".join(query_orders),
                     agg_stats=",".join(
-                        ["target"] +
+                        ["target", "MIN(start_timestamp) as start_timestamp"] +
                         [f"SUM({k})" for k in agg_index_stats] +
                         [f"SUM(CASE optype WHEN {v} THEN num_modify_tuples ELSE 0 END) AS {f}" for f, v in ops] +
                         [f"SUM(CASE optype WHEN {v} THEN 1 ELSE 0 END) AS {f}" for f, v in qs]),
@@ -568,7 +571,7 @@ def construct_query_window_stats(logger, connection, work_prefix, tbls, tbl_inde
 
                 record = execute_sql(index)
                 if len(record) > 0:
-                    idx_frames.append(pd.DataFrame(record, columns=["window_index", "target"] + agg_index_stats + [f for f, _ in ops] + [f for f, _ in qs]))
+                    idx_frames.append(pd.DataFrame(record, columns=["window_index", "target", "start_timestamp"] + agg_index_stats + [f for f, _ in ops] + [f for f, _ in qs]))
             if len(idx_frames) > 0:
                 tbl_ks[tbl + "_index"] = pd.concat(idx_frames, ignore_index=True)
 
