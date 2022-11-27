@@ -31,8 +31,16 @@ def run_job(args):
     #logger.getLogger("build_exec_model").handlers.clear()
     (Path(args.output_path)).mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(Path(args.output_path) / "output.log", mode="a")
-    file_handler.propagate = False
-    logger.addHandler(file_handler)
+    file_handler.setLevel(logging.INFO)
+
+    try:
+        from autogluon.common.utils import log_utils
+        log_utils._logger_ag.addHandler(file_handler)
+        log_utils._logger_ag.propagate = True
+    except:
+        pass
+
+    logging.getLogger('').addHandler(file_handler)
 
     # Print the arguments.
     logger.info("%s", args)
@@ -43,7 +51,7 @@ def run_job(args):
     model_cls = getattr(models, args.model_name)
     if not model_cls.require_optimize():
         # Remove the file handler.
-        logger.removeHandler(file_handler)
+        logging.getLogger('').removeHandler(file_handler)
 
         # We aren't training a neural network model setup so we use the fit() setup.
         dataset = model_cls.get_dataset(logger, args)
@@ -190,11 +198,12 @@ def run_job(args):
             logger.info("Final Loss: %s", it_loss)
 
     # Remove the file handler.
-    logger.removeHandler(file_handler)
+    logging.getLogger('').removeHandler(file_handler)
 
 
 def generate_jobs(model_name, input_dirs, output_dir,
-                  automl_timeout_secs, lrs, epochs,
+                  automl_timeout_secs, automl_quality, automl_forecast_horizon,
+                  automl_splitter_offset, lrs, epochs,
                   batch_size, hidden, train_size, cuda, depths,
                   sweep_dropout, add_nonnorm_features, hist_width,
                   num_cpus, max_threads, num_iterations, ckpt_interval,
@@ -226,6 +235,9 @@ def generate_jobs(model_name, input_dirs, output_dir,
                                 args = {
                                     "model_name": model_name,
                                     "automl_timeout_secs": automl_timeout_secs,
+                                    "automl_quality": automl_quality,
+                                    "automl_forecast_horizon": automl_forecast_horizon,
+                                    "automl_splitter_offset": automl_splitter_offset,
                                     "lr": float(lr),
                                     "num_epochs": int(epoch),
                                     "batch_size": int(batch),
@@ -237,7 +249,7 @@ def generate_jobs(model_name, input_dirs, output_dir,
                                     "depth": int(depth),
                                     "input_dirs": input_dirs,
                                     "dropout": dropout,
-                                    "num_threads": max(1, max_threads / num_cpus),
+                                    "num_threads": int(max(1, max_threads / num_cpus)),
                                     "hist_width": hist_width,
                                     "ckpt_interval": ckpt_interval,
                                     "patience": patience,
@@ -403,11 +415,35 @@ class BuildExecModelCLI(cli.Application):
         help="Number of seconds for the AutoML timeout.",
     )
 
+    automl_quality = cli.SwitchAttr(
+        "--automl-quality",
+        str,
+        default=None,
+        help="AutoML Quality to use.",
+    )
+
+    automl_forecast_horizon = cli.SwitchAttr(
+        "--automl-forecast-horizon",
+        int,
+        default=1,
+        help="AutoML Forecast Horizon",
+    )
+
+    automl_splitter_offset = cli.SwitchAttr(
+        "--automl-splitter-offset",
+        int,
+        default=0,
+        help="AutoML Splitter Offset Padding",
+    )
+
     def main(self):
         generate_jobs(self.model_name,
                       self.input_dirs.split(","),
                       self.output_dir,
                       self.automl_timeout_secs,
+                      self.automl_quality,
+                      self.automl_forecast_horizon,
+                      self.automl_splitter_offset,
                       self.lr.split(","),
                       self.epochs.split(","),
                       self.batch_size.split(","),

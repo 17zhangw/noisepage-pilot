@@ -8,6 +8,9 @@ MAX_KEYS = 5
 MODEL_ARGS_KEYS = [
     "model_name",
     "automl_timeout_secs",
+    "automl_quality",
+    "automl_forecast_horizon",
+    "automl_splitter_offset",
     "lr",
     "num_epochs",
     "batch_size",
@@ -64,3 +67,7 @@ from behavior.model_workload.models.buffer_access_model import AutoMLBufferAcces
 from behavior.model_workload.models.table_feature_model import AutoMLTableFeatureModel
 from behavior.model_workload.models.concurrency_model import AutoMLConcurrencyModel
 from behavior.model_workload.models.buffer_page_model import AutoMLBufferPageModel
+
+from behavior.model_workload.models.table_state_model import AutoMLTableStateModel
+from behavior.model_workload.models.table_state_forecast import AutoMLTableStateForecastWide
+from behavior.model_workload.models.table_state_forecast import AutoMLTableStateForecastNarrow

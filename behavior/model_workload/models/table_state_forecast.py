@@ -25,15 +25,18 @@ from sklearn.preprocessing import MinMaxScaler
 
 try:
     from autogluon.tabular import TabularDataset, TabularPredictor
+    from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
+    from autogluon.timeseries.splitter import MultiWindowSplitter
     from behavior.model_workload.models.multilabel_predictor import MultilabelPredictor
 except:
     pass
 
 
-MODEL_WORKLOAD_TARGETS = [
-    "extend_percent",
-    "defrag_percent",
-    "hot_percent",
+FORECAST_WORKLOAD_TARGETS = [
+    "free_percent",
+    "dead_tuple_percent",
+    "norm_num_pages",
+    "norm_tuple_count",
 ]
 
 MODEL_WORKLOAD_NORMAL_INPUTS = [
@@ -43,6 +46,13 @@ MODEL_WORKLOAD_NORMAL_INPUTS = [
     "norm_tuple_count",
     "norm_tuple_len_avg",
     "target_ff",
+
+    "num_select_queries",
+    "num_insert_queries",
+    "num_update_queries",
+    "num_delete_queries",
+    "num_select_tuples",
+    "num_modify_tuples",
 ]
 
 MODEL_WORKLOAD_NONNORM_INPUTS = [
@@ -68,15 +78,23 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
         num_inputs += len(MODEL_WORKLOAD_NONNORM_INPUTS)
     input_args = np.zeros(num_inputs)
     input_args[0] = input_row.free_percent / 100.0
-    input_args[1] = input_row.tuple_percent / 100.0
+    input_args[1] = input_row.dead_tuple_percent / 100.0
     input_args[2] = input_row.norm_num_pages
     input_args[3] = input_row.norm_tuple_count
     input_args[4] = input_row.norm_tuple_len_avg
     input_args[5] = ff_value
+
+    input_args[6] = input_row.num_select_queries
+    input_args[7] = input_row.num_insert_queries
+    input_args[8] = input_row.num_update_queries
+    input_args[9] = input_row.num_delete_queries
+    input_args[10] = input_row.num_select_tuples
+    input_args[11] = input_row.num_modify_tuples
+
     if model_args.add_nonnorm_features:
-        input_args[6] = input_row.num_pages
-        input_args[7] = input_row.tuple_count
-        input_args[8] = input_row.tuple_len_avg
+        input_args[12] = input_row.num_pages
+        input_args[13] = input_row.tuple_count
+        input_args[14] = input_row.tuple_len_avg
 
     # Construct distribution scaler.
     dist_scalers = np.zeros(5 * hist_width)
@@ -141,11 +159,11 @@ def generate_dataset(logger, model_args, automl=False):
         joblib.dump(tuple_count_scaler, f"{model_args.dataset_path}/tuple_count_scaler.gz")
         joblib.dump(tuple_len_avg_scaler, f"{model_args.dataset_path}/tuple_len_avg_scaler.gz")
 
+    global_buckets = []
     global_args = []
     global_dist_scalers = []
     global_dists = []
     global_masks = []
-    global_targets = []
     correlated_tbls = []
     for d in model_args.input_dirs:
         input_files = glob.glob(f"{d}/exec_features/data/*.feather")
@@ -190,162 +208,18 @@ def generate_dataset(logger, model_args, automl=False):
             data.reset_index(drop=False, inplace=True)
             for wi, df in data.groupby(by=["window_index"]):
                 input_args, dist_scalers, key_dists, masks = generate_point_input(model_args, df.iloc[0], df, tbl_attr_keys[root], ff_value)
+                global_buckets.append([wi])
                 global_args.append(input_args)
                 global_dist_scalers.append(dist_scalers)
                 global_dists.append(key_dists)
                 global_masks.append(masks)
-
-                # FIXME(TARGET): Assume all tuples have equal probability of triggering the event.
-                targets = np.zeros(len(MODEL_WORKLOAD_TARGETS))
-                actual_insert = df.iloc[0].num_insert_tuples + df.iloc[0].num_update_tuples - df.iloc[0].num_hot
-                targets[0] = 0.0 if actual_insert == 0 else df.iloc[0].num_extend / actual_insert
-                targets[1] = 0.0 if df.iloc[0].num_select_tuples == 0 else df.iloc[0].num_defrag / df.iloc[0].num_select_tuples
-                targets[2] = 0.0 if df.iloc[0].num_update_tuples == 0 else df.iloc[0].num_hot / df.iloc[0].num_update_tuples
-                global_targets.append(targets)
                 correlated_tbls.append(root)
 
-    if not automl:
-        with tempfile.NamedTemporaryFile("wb") as f:
-            pickle.dump(global_args, f)
-            pickle.dump(global_dist_scalers, f)
-            pickle.dump(global_dists, f)
-            pickle.dump(global_masks, f)
-            pickle.dump(global_targets, f)
-            f.flush()
-            shutil.copy(f.name, f"{model_args.dataset_path}/dataset.pickle")
-    else:
-        return global_args, global_dist_scalers, global_dists, global_masks, global_targets, tbl_attr_keys, correlated_tbls
+    assert automl
+    return global_buckets, global_args, global_dist_scalers, global_dists, global_masks, tbl_attr_keys, correlated_tbls
 
 
-class TableFeatureModel(nn.Module):
-    def __getitem__(self, key):
-        return getattr(self, key)
-
-    def __setitem__(self, key, value):
-        setattr(self, key, value)
-
-    def require_optimize():
-        return True
-
-    def __init__(self, model_args, num_outputs):
-        super(TableFeatureModel, self).__init__()
-
-        hist_width = model_args.hist_width
-        hid_units = model_args.hidden_size
-
-        # This computes the distribution.
-        self.dist = construct_stack(hist_width * len(MODEL_WORKLOAD_HIST_INPUTS), hid_units, hid_units, model_args.dropout, model_args.depth)
-        # This computes the output targets.
-        num_inputs = len(MODEL_WORKLOAD_NORMAL_INPUTS)
-        if model_args.add_nonnorm_features:
-            num_inputs += len(MODEL_WORKLOAD_NONNORM_INPUTS)
-        self.outputs = construct_stack(hid_units + num_inputs, hid_units, len(MODEL_WORKLOAD_TARGETS), model_args.dropout, model_args.depth)
-
-    def forward(self, **kwargs):
-        global_args = kwargs["global_args"]
-        global_dist_scalers = kwargs["global_dist_scalers"]
-        global_dists = kwargs["global_dists"]
-        global_masks = kwargs["global_masks"]
-
-        bias_dists = global_dists * global_dist_scalers.unsqueeze(1)
-        dists = self.dist(bias_dists)
-        dists = dists * global_masks
-        sum_dists = torch.sum(dists, dim=1, keepdim=False)
-        adjust_masks = torch.sum(global_masks, dim=1, keepdim=False)
-        adjust_masks[adjust_masks == 0] = 1
-        adjust_sum_dists = sum_dists / adjust_masks
-
-        concat_feats = torch.cat([global_args, adjust_sum_dists], dim=1)
-        return self.outputs(concat_feats)
-
-    def loss(self, target_outputs, model_outputs):
-        outputs = target_outputs["global_targets"]
-        loss = MSELoss()(outputs, model_outputs)
-        return loss, loss.item()
-
-    def get_dataset(logger, model_args):
-        dataset_path = Path(model_args.dataset_path) / "dataset.pickle"
-        if not dataset_path.exists():
-            generate_dataset(logger, model_args)
-
-        with open(dataset_path, "rb") as f:
-            global_args = pickle.load(f)
-            global_dist_scalers = pickle.load(f)
-            global_dists = pickle.load(f)
-            global_masks = pickle.load(f)
-            global_targets = pickle.load(f)
-
-        td = dataset.TensorDataset(
-            torch.tensor(np.array(global_args, dtype=np.float32)),
-            torch.tensor(np.array(global_dist_scalers, dtype=np.float32)),
-            torch.tensor(np.array(global_dists, dtype=np.float32)),
-            torch.tensor(np.array(global_masks, dtype=np.float32)),
-            torch.tensor(np.array(global_targets, dtype=np.float32)))
-
-        feat_names = [
-            "global_args",
-            "global_dist_scalers",
-            "global_dists",
-            "global_masks",
-        ]
-
-        target_names = [
-            "global_targets"
-        ]
-
-        num_outputs = len(global_targets[0])
-        return td, feat_names, target_names, num_outputs, None
-
-    def load_model(model_file):
-        model_obj = torch.load(f"{model_file}/best_model.pt")
-        model = TableFeatureModel(model_obj["model_args"], model_obj["num_outputs"])
-        model.model_args = model_obj["model_args"]
-        model.load_state_dict(model_obj["best_model"])
-
-        parent_dir = Path(model_file).parent
-        model.num_pages_scaler = joblib.load(f"{parent_dir}/num_pages_scaler.gz")
-        model.tuple_count_scaler = joblib.load(f"{parent_dir}/tuple_count_scaler.gz")
-        model.tuple_len_avg_scaler = joblib.load(f"{parent_dir}/tuple_len_avg_scaler.gz")
-        return model
-
-    def inference(self, table_state, table_attr_map, keyspace_feat_space, window):
-        global_args = []
-        global_dist_scalers = []
-        global_dists = []
-        global_masks = []
-
-        tbl_keys = [t for t in table_state]
-        norm_num_pages = self.num_pages_scaler.transform(np.array([table_state[t]["num_pages"] for t in tbl_keys]).reshape(-1, 1))
-        norm_tuple_count = self.tuple_count_scaler.transform(np.array([table_state[t]["tuple_count"] for t in tbl_keys]).reshape(-1, 1))
-        norm_tuple_len_avg = self.tuple_len_avg_scaler.transform(np.array([table_state[t]["tuple_len_avg"] for t in tbl_keys]).reshape(-1, 1))
-        for i, t in enumerate(tbl_keys):
-            table_state[t]["norm_num_pages"] = norm_num_pages[i][0]
-            table_state[t]["norm_tuple_count"] = norm_tuple_count[i][0]
-            table_state[t]["norm_tuple_len_avg"] = norm_tuple_len_avg[i][0]
-            df = None
-            if t in keyspace_feat_space:
-                df = keyspace_feat_space[t]
-                df = df[df.window_index == window]
-
-            input_args, dist_scalers, key_dists, masks = generate_point_input(self.model_args, Map(table_state[t]), df, table_attr_map[t], table_state[t]["target_ff"])
-            global_args.append(input_args)
-            global_dist_scalers.append(dist_scalers)
-            global_dists.append(key_dists)
-            global_masks.append(masks)
-
-        inputs = {
-            "global_args": torch.tensor(np.array(global_args, dtype=np.float32)),
-            "global_dist_scalers": torch.tensor(np.array(global_dist_scalers, dtype=np.float32)),
-            "global_dists": torch.tensor(np.array(global_dists, dtype=np.float32)),
-            "global_masks": torch.tensor(np.array(global_masks, dtype=np.float32)),
-        }
-
-        with torch.no_grad():
-            outputs = torch.clip(self(**inputs), 0, 1)
-        return outputs, tbl_keys
-
-
-class AutoMLTableFeatureModel():
+class AutoMLTableStateForecastWide():
     def __getitem__(self, key):
         return getattr(self, key)
 
@@ -356,30 +230,34 @@ class AutoMLTableFeatureModel():
         return False
 
     def __init__(self, model_args):
-        super(AutoMLTableFeatureModel, self).__init__()
+        super(AutoMLTableStateForecastWide, self).__init__()
         self.model_args = model_args
 
 
-    def get_dataset(logger, model_args, inference=False):
-        global_args, global_dist_scalers, global_dists, global_masks, global_targets, tbl_attr_keys, correlated_tbls = generate_dataset(logger, model_args, automl=True)
+    def get_dataset(logger, model_args):
+        global_buckets, global_args, global_dist_scalers, global_dists, global_masks, tbl_attr_keys, correlated_tbls = generate_dataset(logger, model_args, automl=True)
 
         inputs = []
         hist = model_args.hist_width
         for i in range(len(global_args)):
             input_row = {
+                "table": correlated_tbls[i],
+                "window": pd.to_datetime(global_buckets[i][0], unit='s'),
+
                 "free_percent": global_args[i][0],
                 "dead_tuple_percent": global_args[i][1],
                 "norm_num_pages": global_args[i][2],
                 "norm_tuple_count": global_args[i][3],
                 "norm_tuple_len_avg": global_args[i][4],
                 "target_ff": global_args[i][5],
-                "extend_percent": global_targets[i][0],
-                "defrag_percent": global_targets[i][1],
-                "hot_percent": global_targets[i][2],
-            }
 
-            if inference:
-                input_row["table"] = correlated_tbls[i]
+                "num_select_queries": global_args[i][6],
+                "num_insert_queries": global_args[i][7],
+                "num_update_queries": global_args[i][8],
+                "num_delete_queries": global_args[i][9],
+                "num_select_tuples": global_args[i][10],
+                "num_modify_tuples": global_args[i][11],
+            }
 
             dist_range = [
                 ("dist_data", range(0, hist)),
@@ -403,8 +281,7 @@ class AutoMLTableFeatureModel():
 
         inputs = pd.DataFrame(inputs)
         inputs.fillna(value=0, inplace=True)
-        if not inference:
-            inputs.to_feather(f"{model_args.output_path}/model_inputs.feather")
+        inputs.to_feather(f"{model_args.output_path}/model_inputs.feather")
         return inputs
 
 
@@ -412,20 +289,36 @@ class AutoMLTableFeatureModel():
         with open(f"{model_file}/args.pickle", "rb") as f:
             model_args = pickle.load(f)
 
-        model = AutoMLTableFeatureModel(model_args)
-        model.predictor = MultilabelPredictor.load(model_file)
+        model = AutoMLTableStateForecastWide(model_args)
+        for target in FORECAST_WORKLOAD_TARGETS:
+            model[target] = TimeSeriesPredictor.load(f"{model_file}/{target}")
+        model["model_args"] = model_args
         return model
 
 
     def fit(self, dataset):
+        shortest_series_len = dataset.shape[0]
+        for _, df in dataset.groupby(by=["table"]):
+            if df.shape[0] < shortest_series_len:
+                shortest_series_len = df.shape[0]
+
         model_file = self.model_args.output_path
-        predictor = MultilabelPredictor(labels=MODEL_WORKLOAD_TARGETS, problem_types=["regression"]*3, eval_metrics=["mean_absolute_error"]*3, path=model_file, consider_labels_correlation=False)
-        predictor.fit(dataset, time_limit=self.model_args.automl_timeout_secs, presets=self.model_args.automl_quality, num_cpus=self.model_args.num_threads)
+        columns = [c for c in dataset if c != "table" and c != "window" and c not in FORECAST_WORKLOAD_TARGETS]
+        for target in FORECAST_WORKLOAD_TARGETS:
+            ts_dataframe = TimeSeriesDataFrame.from_data_frame(dataset.copy(), id_column="table", timestamp_column="window")
+
+            num_windows = shortest_series_len - self.model_args.automl_forecast_horizon - self.model_args.automl_splitter_offset
+            splitter = MultiWindowSplitter(num_windows=num_windows)
+            predictor = TimeSeriesPredictor(prediction_length=self.model_args.automl_forecast_horizon, target=target, path=f"{model_file}/{target}", validation_splitter=splitter, known_covariates_names=columns, ignore_time_index=True)
+            predictor.fit(ts_dataframe, time_limit=self.model_args.automl_timeout_secs, presets=self.model_args.automl_quality)
+
         with open(f"{self.model_args.output_path}/args.pickle", "wb") as f:
             pickle.dump(self.model_args, f)
 
 
     def inference(self, table_state, table_attr_map, keyspace_feat_space, window):
+        assert False
+
         inputs = []
         tbl_keys = [t for t in table_state]
         for i, t in enumerate(tbl_keys):
@@ -445,6 +338,13 @@ class AutoMLTableFeatureModel():
                 "norm_tuple_count": input_args[3],
                 "norm_tuple_len_avg": input_args[4],
                 "target_ff": input_args[5],
+
+                "num_select_queries": input_args[6],
+                "num_insert_queries": input_args[7],
+                "num_update_queries": input_args[8],
+                "num_delete_queries": input_args[9],
+                "num_select_tuples": input_args[10],
+                "num_modify_tuples": input_args[11],
             }
 
             hist = self.model_args.hist_width
@@ -470,9 +370,150 @@ class AutoMLTableFeatureModel():
         inputs = pd.DataFrame(inputs)
         inputs.fillna(value=0, inplace=True)
         predictions = np.clip(self.predictor.predict(inputs), 0, 1)
-        outputs = np.zeros((len(tbl_keys), len(MODEL_WORKLOAD_TARGETS)))
+        outputs = np.zeros((len(tbl_keys), len(STATE_WORKLOAD_TARGETS)))
         for i, _ in enumerate(tbl_keys):
-            for j, key in enumerate(MODEL_WORKLOAD_TARGETS):
+            for j, key in enumerate(STATE_WORKLOAD_TARGETS):
+                outputs[i][j] = predictions[key].iloc[i]
+
+        return outputs, tbl_keys
+
+
+class AutoMLTableStateForecastNarrow():
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
+
+    def require_optimize():
+        return False
+
+    def __init__(self, model_args):
+        super(AutoMLTableStateForecastNarrow, self).__init__()
+        self.model_args = model_args
+
+
+    def get_dataset(logger, model_args):
+        global_buckets, global_args, global_dist_scalers, global_dists, global_masks, tbl_attr_keys, correlated_tbls = generate_dataset(logger, model_args, automl=True)
+
+        inputs = []
+        hist = model_args.hist_width
+        for i in range(len(global_args)):
+            input_row = {
+                "table": correlated_tbls[i],
+                "window": pd.to_datetime(global_buckets[i][0], unit='s'),
+
+                "free_percent": global_args[i][0],
+                "dead_tuple_percent": global_args[i][1],
+                "norm_num_pages": global_args[i][2],
+                "norm_tuple_count": global_args[i][3],
+                "norm_tuple_len_avg": global_args[i][4],
+                "target_ff": global_args[i][5],
+
+                "num_select_queries": global_args[i][6],
+                "num_insert_queries": global_args[i][7],
+                "num_update_queries": global_args[i][8],
+                "num_delete_queries": global_args[i][9],
+                "num_select_tuples": global_args[i][10],
+                "num_modify_tuples": global_args[i][11],
+            }
+
+            inputs.append(input_row)
+
+        inputs = pd.DataFrame(inputs)
+        inputs.fillna(value=0, inplace=True)
+        inputs.to_feather(f"{model_args.output_path}/model_inputs.feather")
+        return inputs
+
+
+    def load_model(model_file):
+        with open(f"{model_file}/args.pickle", "rb") as f:
+            model_args = pickle.load(f)
+
+        model = AutoMLTableStateForecastNarrow(model_args)
+        for target in FORECAST_WORKLOAD_TARGETS:
+            model[target] = TimeSeriesPredictor.load(f"{model_file}/{target}")
+        model["model_args"] = model_args
+        return model
+
+
+    def fit(self, dataset):
+        shortest_series_len = dataset.shape[0]
+        for _, df in dataset.groupby(by=["table"]):
+            if df.shape[0] < shortest_series_len:
+                shortest_series_len = df.shape[0]
+
+        model_file = self.model_args.output_path
+        columns = [c for c in dataset if c != "table" and c != "window" and c not in FORECAST_WORKLOAD_TARGETS]
+        for target in FORECAST_WORKLOAD_TARGETS:
+            ts_dataframe = TimeSeriesDataFrame.from_data_frame(dataset.copy(), id_column="table", timestamp_column="window")
+
+            num_windows = shortest_series_len - self.model_args.automl_forecast_horizon - self.model_args.automl_splitter_offset
+            splitter = MultiWindowSplitter(num_windows=num_windows)
+            predictor = TimeSeriesPredictor(prediction_length=self.model_args.automl_forecast_horizon, target=target, path=f"{model_file}/{target}", validation_splitter=splitter, known_covariates_names=columns, ignore_time_index=True)
+            predictor.fit(ts_dataframe, time_limit=self.model_args.automl_timeout_secs, presets=self.model_args.automl_quality)
+
+        with open(f"{self.model_args.output_path}/args.pickle", "wb") as f:
+            pickle.dump(self.model_args, f)
+
+
+    def inference(self, table_state, table_attr_map, keyspace_feat_space, window):
+        assert False
+
+        inputs = []
+        tbl_keys = [t for t in table_state]
+        for i, t in enumerate(tbl_keys):
+            table_state[t]["norm_num_pages"] = table_state[t]["num_pages"]
+            table_state[t]["norm_tuple_count"] = table_state[t]["tuple_count"]
+            table_state[t]["norm_tuple_len_avg"] = table_state[t]["tuple_len_avg"]
+            df = None
+            if t in keyspace_feat_space:
+                df = keyspace_feat_space[t]
+                df = df[df.window_index == window]
+
+            input_args, dist_scalers, key_dists, masks = generate_point_input(self.model_args, Map(table_state[t]), df, table_attr_map[t], table_state[t]["target_ff"])
+            input_row = {
+                "free_percent": input_args[0],
+                "dead_tuple_percent": input_args[1],
+                "norm_num_pages": input_args[2],
+                "norm_tuple_count": input_args[3],
+                "norm_tuple_len_avg": input_args[4],
+                "target_ff": input_args[5],
+
+                "num_select_queries": input_args[6],
+                "num_insert_queries": input_args[7],
+                "num_update_queries": input_args[8],
+                "num_delete_queries": input_args[9],
+                "num_select_tuples": input_args[10],
+                "num_modify_tuples": input_args[11],
+            }
+
+            hist = self.model_args.hist_width
+            dist_range = [
+                ("dist_data", range(0, hist)),
+                ("dist_select", range(hist, 2 * hist)),
+                ("dist_insert", range(2 * hist, 3 * hist)),
+                ("dist_update", range(3 * hist, 4 * hist)),
+                ("dist_delete", range(4 * hist, 5 * hist))
+            ]
+            for name, rg in dist_range:
+                for j in rg:
+                    input_row[f"{name}_{j}"] = dist_scalers[j]
+
+            for colidx, col in enumerate(table_attr_map[t]):
+                if masks[colidx] == 1:
+                    for name, rg in dist_range:
+                        for j in rg:
+                            # We have a valid array.
+                            input_row[f"{t}_{col}_{name}_{j%hist}"] = key_dists[colidx][j]
+            inputs.append(input_row)
+
+        inputs = pd.DataFrame(inputs)
+        inputs.fillna(value=0, inplace=True)
+        predictions = np.clip(self.predictor.predict(inputs), 0, 1)
+        outputs = np.zeros((len(tbl_keys), len(STATE_WORKLOAD_TARGETS)))
+        for i, _ in enumerate(tbl_keys):
+            for j, key in enumerate(STATE_WORKLOAD_TARGETS):
                 outputs[i][j] = predictions[key].iloc[i]
 
         return outputs, tbl_keys

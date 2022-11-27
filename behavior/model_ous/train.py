@@ -112,8 +112,19 @@ def main(
         ou_name = ou.name
         ou_results = [fp for fp in train_files if fp.name == f"{ou_name}.csv"]
 
-        # Block derived features
+        # Arbitrarily set the chunk size to be 131072
+        loader = OUDataLoader(logger, separate_indkey_features, ou_results, 131072, True)
+        df_train = loader.get_next_data()
+
+        # We have no data.
+        if df_train is None or df_train.shape[0] == 0:
+            continue
+
+        # By default start with all non-plan features disabled.
         ignore_cols = [ "data_identifier" ]
+        ignore_cols.extend([f for f in df_train.columns if not f.startswith(ou_name + "_")])
+
+        # Incrementally re-enable them.
         relevant_features = {k: v for k, v in DERIVED_FEATURES_MAP.items() if k.startswith(ou_name + "_") or k.endswith("_" + ou_name)}
         for n, v in relevant_features.items():
             allow = False
@@ -123,18 +134,11 @@ def main(
 
             if not allow:
                 ignore_cols.append(v)
-
-        # Arbitrarily set the chunk size to be 131072
-        loader = OUDataLoader(logger, separate_indkey_features, ou_results, 131072, True)
-        df_train = loader.get_next_data()
-
-        # We have no data.
-        if df_train is None or df_train.shape[0] == 0:
-            continue
+            elif v in ignore_cols:
+                ignore_cols.remove(v)
 
         # Get a metadata representation for extracting all feature columns.
         features = sorted(list(set(df_train.columns) - set(TARGET_COLUMNS) - set(ignore_cols)))
-
         targets = [Targets.ELAPSED_US.value]
         logger.info("Begin Training OU: %s", ou_name)
         logger.info("Derived input features for OU: %s (%s)", ou_name, features)

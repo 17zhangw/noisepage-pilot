@@ -200,8 +200,10 @@ def task_workload_build_exec_model():
     """
     def workload_build_exec_model(
             model_name, input_dirs, output_dir,
-            automl_timeout_secs, lr,
-            epochs, batch_size, cuda, train_size, hidden,
+            automl_timeout_secs, automl_quality,
+            automl_forecast_horizon,
+            automl_splitter_offset,
+            lr, epochs, batch_size, cuda, train_size, hidden,
             depth, sweep_dropout, add_nonnorm_features, num_iterations,
             num_cpus, max_threads, hist_width, patience, ckpt_interval,
             steps, window_slices):
@@ -215,6 +217,9 @@ def task_workload_build_exec_model():
         eval_args = (
             f"--model-name {model_name} "
             f"--automl-timeout-secs {automl_timeout_secs} "
+            f"--automl-quality {automl_quality} "
+            f"--automl-forecast-horizon {automl_forecast_horizon} "
+            f"--automl-splitter-offset {automl_splitter_offset} "
             f"--train-size {train_size} "
             f"--input-dirs {input_dirs} "
             f"--output-dir {output_dir} "
@@ -256,6 +261,9 @@ def task_workload_build_exec_model():
             { "name": "input_dirs", "long": "input_dirs", "help": "Path to multiple input directories.", "default": None, },
             { "name": "output_dir", "long": "output_dir", "help": "Path to the containing output model directory.", "default": None, },
             { "name": "automl_timeout_secs", "long": "automl_timeout_secs", "help": "AutoML timeout in seconds.", "default": 3600, },
+            { "name": "automl_quality", "long": "automl_quality", "help": "AutoML Quality.", "default": None, },
+            { "name": "automl_forecast_horizon", "long": "automl_forecast_horizon", "help": "AutomL Forecast horizon", "default": 1, },
+            { "name": "automl_splitter_offset", "long": "automl_splitter_offset", "help": "AutomL Splitter Extra Padding", "default": 0, },
             { "name": "lr", "long": "lr", "help": "Learning rate to use for training.", "default": None, },
             { "name": "epochs", "long": "epochs", "help": "Epochs to use for training.", "default": None, },
             { "name": "batch_size", "long": "batch_size", "help": "Batch size to use for training.", "default": None, },
