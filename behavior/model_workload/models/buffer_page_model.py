@@ -38,6 +38,13 @@ MODEL_WORKLOAD_NORMAL_INPUTS = [
     "target_ff",
 ]
 
+MODEL_WORKLOAD_TARGETS = [
+    "asked_pages_per_tuple",
+]
+
+MODEL_WORKLOAD_METRICS = [
+    "root_mean_squared_error",
+]
 
 def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
     hist_width = model_args.hist_width
@@ -230,9 +237,9 @@ class AutoMLBufferPageModel():
 
 
     def fit(self, dataset):
-        predictor = TabularPredictor(label="asked_pages_per_tuple", problem_type="regression", eval_metric="mean_squared_error", path=self.model_args.output_path)
+        predictor = TabularPredictor(label=MODEL_WORKLOAD_TARGETS[0], problem_type="regression", eval_metric=MODEL_WORKLOAD_METRICS[0], path=self.model_args.output_path)
         predictor.fit(dataset, time_limit=self.model_args.automl_timeout_secs, presets=self.model_args.automl_quality, num_cpus=self.model_args.num_threads)
-        with open(f"{self.args.output_path}/args.pickle", "wb") as f:
+        with open(f"{self.model_args.output_path}/args.pickle", "wb") as f:
             pickle.dump(self.args, f)
 
 

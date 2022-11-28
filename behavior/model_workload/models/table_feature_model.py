@@ -428,7 +428,8 @@ class AutoMLTableFeatureModel():
 
     def fit(self, dataset):
         model_file = self.model_args.output_path
-        predictor = MultilabelPredictor(labels=MODEL_WORKLOAD_TARGETS, problem_types=["regression"]*3, eval_metrics=["mean_absolute_error"]*3, path=model_file, consider_labels_correlation=False)
+        num = len(MODEL_WORKLOAD_TARGETS)
+        predictor = MultilabelPredictor(labels=MODEL_WORKLOAD_TARGETS, problem_types=["regression"]*num, eval_metrics=["mean_absolute_error"]*num, path=model_file, consider_labels_correlation=False)
         predictor.fit(dataset, time_limit=self.model_args.automl_timeout_secs, presets=self.model_args.automl_quality, num_cpus=self.model_args.num_threads)
         with open(f"{self.model_args.output_path}/args.pickle", "wb") as f:
             pickle.dump(self.model_args, f)

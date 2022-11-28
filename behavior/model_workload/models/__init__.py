@@ -71,3 +71,6 @@ from behavior.model_workload.models.buffer_page_model import AutoMLBufferPageMod
 from behavior.model_workload.models.table_state_model import AutoMLTableStateModel
 from behavior.model_workload.models.table_state_forecast import AutoMLTableStateForecastWide
 from behavior.model_workload.models.table_state_forecast import AutoMLTableStateForecastNarrow
+
+from behavior.model_workload.models.index_feature_model import AutoMLIndexFeatureModel
+from behavior.model_workload.models.index_state_model import AutoMLIndexStateModel

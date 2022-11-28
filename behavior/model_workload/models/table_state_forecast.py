@@ -52,7 +52,9 @@ MODEL_WORKLOAD_NORMAL_INPUTS = [
     "num_update_queries",
     "num_delete_queries",
     "num_select_tuples",
-    "num_modify_tuples",
+    "num_insert_tuples",
+    "num_update_tuples",
+    "num_delete_tuples",
 ]
 
 MODEL_WORKLOAD_NONNORM_INPUTS = [
@@ -89,12 +91,14 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
     input_args[8] = input_row.num_update_queries
     input_args[9] = input_row.num_delete_queries
     input_args[10] = input_row.num_select_tuples
-    input_args[11] = input_row.num_modify_tuples
+    input_args[11] = input_row.num_insert_tuples
+    input_args[12] = input_row.num_update_tuples
+    input_args[13] = input_row.num_delete_tuples
 
     if model_args.add_nonnorm_features:
-        input_args[12] = input_row.num_pages
-        input_args[13] = input_row.tuple_count if "tuple_count" in input_row else input_row.approx_tuple_count
-        input_args[14] = input_row.tuple_len_avg
+        input_args[14] = input_row.num_pages
+        input_args[15] = input_row.tuple_count if "tuple_count" in input_row else input_row.approx_tuple_count
+        input_args[16] = input_row.tuple_len_avg
 
     # Construct distribution scaler.
     dist_scalers = np.zeros(5 * hist_width)
@@ -264,7 +268,9 @@ class AutoMLTableStateForecastWide():
                 "num_update_queries": global_args[i][8],
                 "num_delete_queries": global_args[i][9],
                 "num_select_tuples": global_args[i][10],
-                "num_modify_tuples": global_args[i][11],
+                "num_insert_tuples": global_args[i][11],
+                "num_update_tuples": global_args[i][12],
+                "num_delete_tuples": global_args[i][13],
             }
 
             dist_range = [
