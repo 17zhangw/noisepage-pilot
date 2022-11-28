@@ -35,6 +35,7 @@ SELECT  s.query_order,
         s.target,
         MAX(s.num_modify_tuples) as num_modify_tuples,
         MAX(s.num_select_tuples) as num_select_tuples,
+        MAX(s.num_inserts) as num_inserts,
         MAX(s.num_extend) as num_extend,
         MAX(s.num_split) as num_split
 FROM (
@@ -561,7 +562,7 @@ def construct_query_window_stats(logger, connection, work_prefix, tbls, tbl_inde
                     work_prefix=work_prefix,
                     query_orders=",".join(query_orders),
                     agg_stats=",".join(
-                        ["target", "MIN(start_timestamp) as start_timestamp"] +
+                        ["target", "MIN(statement_timestamp) as statement_timestamp"] +
                         [f"SUM({k})" for k in agg_index_stats] +
                         [f"SUM(CASE optype WHEN {v} THEN num_modify_tuples ELSE 0 END) AS {f}" for f, v in ops] +
                         [f"SUM(CASE optype WHEN {v} THEN 1 ELSE 0 END) AS {f}" for f, v in qs]),

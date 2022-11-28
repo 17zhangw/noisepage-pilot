@@ -245,7 +245,7 @@ def build_window_indexes(connection, work_prefix, input_dir, tables, all_targets
 
 
 def __gen_exec_features(input_dir, connection, work_prefix, wa, buckets):
-    if (Path(input_dir) / "exec_features/keys/done").exists():
+    if (Path(input_dir) / "exec_features/data/done").exists():
         return
 
     # Compute the window frames.
@@ -313,7 +313,7 @@ def __gen_data_page_features(input_dir, engine, connection, work_prefix, wa, buc
             output_dir = Path(input_dir) / f"data_page_{slice_fragment}/keys"
             callback = save_bucket_keys_to_output(output_dir)
             tbls = [t for t in tables if not (Path(output_dir) / f"{t}.feather").exists()]
-            construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, data_hist=False, callback_fn=callback)
+            construct_keyspaces(logger, connection, work_prefix, tbls, wa.table_attr_map, window_index_map, buckets, callback_fn=callback)
             open(f"{input_dir}/data_page_{slice_fragment}/keys/done", "w").close()
 
         for t, v in window_index_map.items():

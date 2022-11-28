@@ -35,9 +35,10 @@ def extract_train_tables_keys_features(add_nonnorm, tbl_map, tbl_mapping, keys, 
                 assert g[0] != "data"
                 for ig in g[1].itertuples():
                     j = None
-                    for j, kt in enumerate(keys[t]):
+                    for idx_kt, kt in enumerate(keys[t]):
                         # Find the correct attribute index to use for the data.
                         if kt == ig.att_name:
+                            j = idx_kt
                             break
                     assert j is not None, "There is a misalignment between what is considered a useful attribute by data pages and analysis."
 

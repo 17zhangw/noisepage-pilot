@@ -82,7 +82,7 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
     if model_args.add_nonnorm_features:
         num_inputs += len(MODEL_WORKLOAD_NONNORM_INPUTS)
     input_args = np.zeros(num_inputs)
-    input_args[0] = input_row.free_percent / 100.0
+    input_args[0] = (input_row.free_percent if "free_percent" in input_row else input_row.approx_free_percent) / 100.0
     input_args[1] = input_row.dead_tuple_percent / 100.0
     input_args[2] = input_row.norm_num_pages
     input_args[3] = input_row.norm_tuple_count
@@ -98,7 +98,7 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
 
     if model_args.add_nonnorm_features:
         input_args[12] = input_row.num_pages
-        input_args[13] = input_row.tuple_count
+        input_args[13] = input_row.tuple_count if "tuple_count" in input_row else input_row.approx_tuple_count
         input_args[14] = input_row.tuple_len_avg
 
     # Construct distribution scaler.
@@ -117,8 +117,9 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
     if df is not None and "att_name" in df:
         for ig in df.itertuples():
             j = None
-            for j, kt in enumerate(tbl_attr_keys):
+            for idx_kt, kt in enumerate(tbl_attr_keys):
                 if kt == ig.att_name:
+                    j = idx_kt
                     break
             assert j is not None, "There is a misalignment between what is considered a useful attribute by data pages and analysis."
             assert (ig.optype, j) not in seen
@@ -154,8 +155,15 @@ def generate_dataset(logger, model_args, automl=False):
 
         data = pd.concat(map(pd.read_feather, all_files))
         data["num_pages"] = data.table_len / 8192.0
-        data["tuple_len_avg"] = data.tuple_len / data.tuple_count
-        return MinMaxScaler().fit(data.num_pages.values.reshape(-1, 1)), MinMaxScaler().fit(data.tuple_count.values.reshape(-1, 1)), MinMaxScaler().fit(data.tuple_len_avg.values.reshape(-1, 1))
+        data["tuple_len_avg"] = (data.tuple_len / data.tuple_count) if "tuple_count" in data else (data.approx_tuple_len / data.approx_tuple_count)
+
+        num_page_scaler = MinMaxScaler().fit(data.num_pages.values.reshape(-1, 1))
+        if "tuple_count" in data:
+            tuple_count_scaler = MinMaxScaler().fit(data.tuple_count.values.reshape(-1, 1))
+        else:
+            tuple_count_scaler = MinMaxScaler().fit(data.approx_tuple_count.values.reshape(-1, 1))
+        tuple_len_scaler = MinMaxScaler().fit(data.tuple_len_avg.values.reshape(-1, 1))
+        return num_page_scaler, tuple_count_scaler, tuple_len_scaler
 
     if not automl:
         (Path(model_args.dataset_path)).mkdir(parents=True, exist_ok=True)
@@ -180,14 +188,15 @@ def generate_dataset(logger, model_args, automl=False):
             data = pd.read_feather(input_file)
             windows = pd.read_feather(f"{d}/exec_features/windows/{root}.feather")
             windows["num_pages"] = windows.table_len / 8192.0
-            windows["tuple_len_avg"] = windows.tuple_len / windows.tuple_count
+            windows["tuple_len_avg"] = (windows.tuple_len / windows.tuple_count) if "tuple_count" in windows else (windows.approx_tuple_len / windows.approx_tuple_count)
             if not automl:
                 windows["norm_num_pages"] = num_pages_scaler.transform(windows.num_pages.values.reshape(-1, 1))
-                windows["norm_tuple_count"] = tuple_count_scaler.transform(windows.tuple_count.values.reshape(-1, 1))
+                tuple_count = windows.tuple_count if "tuple_count" in windows else windows.approx_tuple_count
+                windows["norm_tuple_count"] = tuple_count_scaler.transform(tuple_count.values.reshape(-1, 1))
                 windows["norm_tuple_len_avg"] = tuple_len_avg_scaler.transform(windows.tuple_len_avg.values.reshape(-1, 1))
             else:
                 windows["norm_num_pages"] = windows.num_pages
-                windows["norm_tuple_count"] = windows.tuple_count
+                windows["norm_tuple_count"] = windows.tuple_count if "tuple_count" in windows else windows.approx_tuple_count
                 windows["norm_tuple_len_avg"] = windows.tuple_len_avg
 
             data.set_index(keys=["window_index"], inplace=True)
