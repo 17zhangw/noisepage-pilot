@@ -224,7 +224,7 @@ class AutoMLIndexStateModel():
 
         inputs = []
         hist = model_args.hist_width
-        for i in range(len(global_args)):
+        for i in range(len(global_args) - 1):
             if correlated_idxs[i] != correlated_idxs[i+1]:
                 continue
 
