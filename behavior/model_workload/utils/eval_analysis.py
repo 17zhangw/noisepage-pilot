@@ -6,7 +6,7 @@ def load_eval_windows(logger, connection, work_prefix, max_arg, base_tbls, query
             CREATE UNLOGGED TABLE {prefix}_mw_eval_analysis (
                 query_order BIGINT,
                 query_id BIGINT,
-                unix_timestamp BIGINT,
+                unix_timestamp FLOAT8,
                 optype INT,
                 query_text TEXT,
                 target TEXT,

@@ -32,13 +32,15 @@ except:
 
 
 MODEL_WORKLOAD_TARGETS = [
+    "next_tree_level",
     "next_num_pages",
     "next_leaf_pages",
     "next_deleted_pages",
-    "next_avg_leaf_densty",
+    "next_avg_leaf_density",
 ]
 
 MODEL_WORKLOAD_METRICS = [
+    "root_mean_squared_error",
     "root_mean_squared_error",
     "root_mean_squared_error",
     "root_mean_squared_error",
@@ -46,6 +48,7 @@ MODEL_WORKLOAD_METRICS = [
 ]
 
 MODEL_WORKLOAD_NORMAL_INPUTS = [
+    "tree_level",
     "num_pages",
     "leaf_pages",
     "deleted_pages",
@@ -76,19 +79,20 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys):
     # Construct the augmented inputs.
     num_inputs = len(MODEL_WORKLOAD_NORMAL_INPUTS)
     input_args = np.zeros(num_inputs)
-    input_args[0] = input_row.num_pages
-    input_args[1] = input_row.leaf_pages
-    input_args[2] = input_row.deleted_pages
-    input_args[3] = input_row.avg_leaf_density / 100.0
-    input_args[4] = input_row.num_inserts
-    input_args[5] = input_row.num_select_queries
-    input_args[6] = input_row.num_insert_queries
-    input_args[7] = input_row.num_update_queries
-    input_args[8] = input_row.num_delete_queries
-    input_args[9] = input_row.num_select_tuples
-    input_args[10] = input_row.num_insert_tuples
-    input_args[11] = input_row.num_update_tuples
-    input_args[12] = input_row.num_delete_tuples
+    input_args[0] = input_row.tree_level
+    input_args[1] = input_row.num_pages
+    input_args[2] = input_row.leaf_pages
+    input_args[3] = input_row.deleted_pages
+    input_args[4] = input_row.avg_leaf_density / 100.0
+    input_args[5] = input_row.num_inserts
+    input_args[6] = input_row.num_select_queries
+    input_args[7] = input_row.num_insert_queries
+    input_args[8] = input_row.num_update_queries
+    input_args[9] = input_row.num_delete_queries
+    input_args[10] = input_row.num_select_tuples
+    input_args[11] = input_row.num_insert_tuples
+    input_args[12] = input_row.num_update_tuples
+    input_args[13] = input_row.num_delete_tuples
 
     # Construct distribution scaler.
     dist_scalers = np.zeros(5 * hist_width)
@@ -232,25 +236,27 @@ class AutoMLIndexStateModel():
                 continue
 
             input_row = {
-                "num_pages": global_args[i][0],
-                "leaf_pages": global_args[i][1],
-                "deleted_pages": global_args[i][2],
-                "avg_leaf_density": global_args[i][3],
+                "tree_level": global_args[i][0],
+                "num_pages": global_args[i][1],
+                "leaf_pages": global_args[i][2],
+                "deleted_pages": global_args[i][3],
+                "avg_leaf_density": global_args[i][4],
 
-                "num_index_inserts": global_args[i][4],
-                "num_select_queries": global_args[i][5],
-                "num_insert_queries": global_args[i][6],
-                "num_update_queries": global_args[i][7],
-                "num_delete_queries": global_args[i][8],
-                "num_select_tuples": global_args[i][9],
-                "num_insert_tuples": global_args[i][10],
-                "num_update_tuples": global_args[i][11],
-                "num_delete_tuples": global_args[i][12],
+                "num_index_inserts": global_args[i][5],
+                "num_select_queries": global_args[i][6],
+                "num_insert_queries": global_args[i][7],
+                "num_update_queries": global_args[i][8],
+                "num_delete_queries": global_args[i][9],
+                "num_select_tuples": global_args[i][10],
+                "num_insert_tuples": global_args[i][11],
+                "num_update_tuples": global_args[i][12],
+                "num_delete_tuples": global_args[i][13],
 
-                "next_num_pages": global_args[i+1][0],
-                "next_leaf_pages": global_args[i+1][1],
-                "next_deleted_pages": global_args[i+1][2],
-                "next_avg_leaf_densty": global_args[i+1][3],
+                "next_tree_level": global_args[i+1][0],
+                "next_num_pages": global_args[i+1][1],
+                "next_leaf_pages": global_args[i+1][2],
+                "next_deleted_pages": global_args[i+1][3],
+                "next_avg_leaf_density": global_args[i+1][4],
             }
 
             if inference:
@@ -287,7 +293,7 @@ class AutoMLIndexStateModel():
         with open(f"{model_file}/args.pickle", "rb") as f:
             model_args = pickle.load(f)
 
-        model = AutoMLTableFeatureModel(model_args)
+        model = AutoMLIndexStateModel(model_args)
         model.predictor = MultilabelPredictor.load(model_file)
         return model
 

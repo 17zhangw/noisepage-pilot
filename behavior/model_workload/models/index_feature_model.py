@@ -249,7 +249,7 @@ class AutoMLIndexFeatureModel():
         with open(f"{model_file}/args.pickle", "rb") as f:
             model_args = pickle.load(f)
 
-        model = AutoMLTableFeatureModel(model_args)
+        model = AutoMLIndexFeatureModel(model_args)
         model.predictor = MultilabelPredictor.load(model_file)
         return model
 
