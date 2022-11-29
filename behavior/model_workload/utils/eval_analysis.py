@@ -6,7 +6,7 @@ def load_eval_windows(logger, connection, work_prefix, max_arg, base_tbls, query
             CREATE UNLOGGED TABLE {prefix}_mw_eval_analysis (
                 query_order BIGINT,
                 query_id BIGINT,
-                statement_timestamp BIGINT,
+                unix_timestamp BIGINT,
                 optype INT,
                 query_text TEXT,
                 target TEXT,
@@ -28,8 +28,8 @@ def load_eval_windows(logger, connection, work_prefix, max_arg, base_tbls, query
                 """.format(prefix=work_prefix, t=t))
 
             query = """
-                INSERT INTO {prefix}_mw_eval_analysis (query_order, query_id, statement_timestamp, optype, query_text, target, elapsed_us, {args} {tbl_hits})
-                SELECT a.query_order, a.query_id, a.statement_timestamp, a.optype, a.query_text, a.target, a.elapsed_us, {sel_args} {sel_tbl_hits}
+                INSERT INTO {prefix}_mw_eval_analysis (query_order, query_id, unix_timestamp, optype, query_text, target, elapsed_us, {args} {tbl_hits})
+                SELECT a.query_order, a.query_id, a.unix_timestamp, a.optype, a.query_text, a.target, a.elapsed_us, {sel_args} {sel_tbl_hits}
                 FROM {prefix}_mw_queries_args a
                 {joins}
                 WHERE a.target = '{tbl}'

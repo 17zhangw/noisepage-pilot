@@ -174,7 +174,7 @@ def analyze_workload(benchmark, input_dir, workload_only, psycopg2_conn, work_pr
             logger.info("Computing statistics features")
             build_table_exec(logger, connection, work_prefix, list(set(wa.query_table_map.values())))
 
-        if workload_only and load_windows:
+        if load_windows:
             logger.info("Loading windows for workload analysis.")
             max_arg = 0
             for q, v in wa.query_template_map.items():
