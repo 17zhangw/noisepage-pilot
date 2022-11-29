@@ -240,7 +240,7 @@ class AutoMLBufferPageModel():
         predictor = TabularPredictor(label=MODEL_WORKLOAD_TARGETS[0], problem_type="regression", eval_metric=MODEL_WORKLOAD_METRICS[0], path=self.model_args.output_path)
         predictor.fit(dataset, time_limit=self.model_args.automl_timeout_secs, presets=self.model_args.automl_quality, num_cpus=self.model_args.num_threads)
         with open(f"{self.model_args.output_path}/args.pickle", "wb") as f:
-            pickle.dump(self.args, f)
+            pickle.dump(self.model_args, f)
 
 
     def get_dataset(logger, model_args, inference=False):
