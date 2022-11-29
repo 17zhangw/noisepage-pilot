@@ -152,6 +152,7 @@ def generate_dataset(logger, model_args, automl=False):
         for input_file in input_files:
             # Analyze each index in the input frame.
             all_idxs = pd.read_feather(input_file)
+            all_idxs["unix_timestamp"] = postgres_julian_to_unix(all_idxs.start_timestamp).astype(float)
             unique_targets = [f for f in all_idxs.target.unique() if f not in metadata.table_attr_map]
             for idx in unique_targets:
                 # Find the table this index belongs to.
@@ -164,8 +165,7 @@ def generate_dataset(logger, model_args, automl=False):
                 tbl = metadata.indexoid_table_map[idxoid]
 
                 # Get the relevant data segment.
-                data = all_idxs[(all_idxs.target == tbl) | (all_idxs.target == idx)]
-                data["unix_timestamp"] = postgres_julian_to_unix(data.start_timestamp).astype(float)
+                data = all_idxs[(all_idxs.target == tbl) | (all_idxs.target == idx)].copy()
                 data.set_index(keys=["unix_timestamp"], inplace=True)
                 data.sort_index(inplace=True)
 
