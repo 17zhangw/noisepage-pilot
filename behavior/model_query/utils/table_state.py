@@ -213,7 +213,8 @@ def compute_next_window_state(ougc, window, output_df=False):
 
         if ougc.table_state_model is not None:
             # Try to stabilize the result. Assume est_tuple_count is the upper bound.
-            est_tuple_count = min(est_tuple_count, predicted_state[tbl]["next_table_num_tuples"])
+            est_tuple_count = min(tbl_state["tuple_count"] + tbl_state["num_insert_tuples"], predicted_state[tbl]["next_table_num_tuples"])
+            est_tuple_count = max(tbl_state["tuple_count"] - tbl_state["num_delete_tuples"], predicted_state[tbl]["next_table_num_tuples"])
 
         if ougc.table_state_model is not None:
             # We can't go negative in page delta.

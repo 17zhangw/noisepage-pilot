@@ -40,16 +40,13 @@ logger = logging.getLogger(__name__)
 
 def generate_qos_from_ts(connection, work_prefix, timestamps):
     with connection.transaction() as tx:
-        connection.execute(f"DROP INDEX {work_prefix}_mw_eval_analysis_idx_qo")
-        connection.execute(f"CREATE INDEX {work_prefix}_mw_eval_analysis_time ON {work_prefix}_mw_eval_analysis (unix_timestamp, query_order)")
-
         # This SQL is awkward. But the insight here is that instead of [t1, t2, t3] as providing the bounds, we want to use query_order.
         # Since width_bucket() uses the property that if x = t1, it returns [t1, t2] bucket. So in principle, we want to find the first
         # query *AFTER* t1 so it'll still act as the correct exclusive bound.
         sql = "UNNEST(ARRAY[" + ",".join([str(i) for i in timestamps]) + "], "
         sql += "ARRAY[" + ",".join([str(i) for i in range(len(timestamps))]) + "]) as x(time, window_index)"
         sql = f"SELECT window_index, time, b.query_order FROM {sql}, "
-        sql += f"LATERAL (SELECT query_order FROM {work_prefix}_mw_eval_analysis WHERE unix_timestamp > time ORDER BY unix_timestamp, query_order ASC LIMIT 1) b ORDER BY window_index"
+        sql += f"LATERAL (SELECT query_order FROM {work_prefix}_mw_eval_analysis WHERE query_order >= 1 and unix_timestamp > time ORDER BY unix_timestamp, query_order ASC LIMIT 1) b ORDER BY window_index"
         c = connection.execute(sql)
         tups = [(tup[0], tup[2]) for tup in c]
 
@@ -305,8 +302,11 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
 
     with psycopg.connect(workload_analysis_conn) as workload_conn:
         with psycopg.connect(target_db_conn) as target_conn:
-            target_conn.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
-            target_conn.execute("CREATE EXTENSION IF NOT EXISTS qss")
+            with target_conn.transaction() as txn:
+                target_conn.execute("SET qss_capture_enabled = OFF")
+                target_conn.execute("SET plan_cache_mode = 'force_generic_plan'")
+                target_conn.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
+                target_conn.execute("CREATE EXTENSION IF NOT EXISTS qss")
 
             # Get the DDL changes and the initial shared_buffers state.
             ougc.shared_buffers = [r for r in target_conn.execute("SHOW shared_buffers")][0][0]

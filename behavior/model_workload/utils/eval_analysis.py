@@ -45,7 +45,8 @@ def load_eval_windows(logger, connection, work_prefix, max_arg, base_tbls, query
             connection.execute(query)
 
         logger.info("Creating index on the eval analysis table.")
-        connection.execute(f"CREATE INDEX {work_prefix}_mw_eval_analysis_idx_qo ON {work_prefix}_mw_eval_analysis (query_order)")
+        connection.execute(f"CREATE INDEX {work_prefix}_mw_eval_analysis_idx_qo ON {work_prefix}_mw_eval_analysis (query_order, unix_timestamp)")
+        connection.execute(f"CREATE INDEX {work_prefix}_mw_eval_analysis_idx_qo_1 ON {work_prefix}_mw_eval_analysis (unix_timestamp, query_order)")
         logger.info("Clustering the eval analysis table.")
         connection.execute(f"CLUSTER {work_prefix}_mw_eval_analysis USING {work_prefix}_mw_eval_analysis_idx_qo")
     connection.execute(f"VACUUM ANALYZE {work_prefix}_mw_eval_analysis")
