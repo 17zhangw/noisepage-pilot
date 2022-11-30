@@ -31,6 +31,7 @@ class OUGenerationContext:
     # This is the state that should be fetched by each worker (such as models).
     ou_models = None
     table_feature_model = None
+    table_state_model = None
     buffer_page_model = None
     buffer_access_model = None
     concurrency_model = None

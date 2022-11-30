@@ -6,6 +6,7 @@ import logging
 import glob
 import shutil
 import psycopg
+from psycopg import Rollback
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -36,6 +37,26 @@ logger = logging.getLogger(__name__)
 ##################################################################################
 # Generate the keyspace features.
 ##################################################################################
+
+def generate_qos_from_ts(connection, work_prefix, timestamps):
+    with connection.transaction() as tx:
+        connection.execute(f"DROP INDEX {work_prefix}_mw_eval_analysis_idx_qo")
+        connection.execute(f"CREATE INDEX {work_prefix}_mw_eval_analysis_time ON {work_prefix}_mw_eval_analysis (unix_timestamp, query_order)")
+
+        # This SQL is awkward. But the insight here is that instead of [t1, t2, t3] as providing the bounds, we want to use query_order.
+        # Since width_bucket() uses the property that if x = t1, it returns [t1, t2] bucket. So in principle, we want to find the first
+        # query *AFTER* t1 so it'll still act as the correct exclusive bound.
+        sql = "UNNEST(ARRAY[" + ",".join([str(i) for i in timestamps]) + "], "
+        sql += "ARRAY[" + ",".join([str(i) for i in range(len(timestamps))]) + "]) as x(time, window_index)"
+        sql = f"SELECT window_index, time, b.query_order FROM {sql}, "
+        sql += f"LATERAL (SELECT query_order FROM {work_prefix}_mw_eval_analysis WHERE unix_timestamp > time ORDER BY unix_timestamp, query_order ASC LIMIT 1) b ORDER BY window_index"
+        c = connection.execute(sql)
+        tups = [(tup[0], tup[2]) for tup in c]
+
+        # Let's rollback the index.
+        raise Rollback(tx)
+    return tups
+
 
 def populate_keyspace_features(workload_conn, workload_analysis_prefix, output_dir, ougc, qos_windows, histogram_width):
     # Populate the keyspace features.
@@ -89,6 +110,9 @@ def advance_ddl_change(ddl_changes, target_conn, ougc, current_qo):
 
 
 def compute_ddl_changes(dir_data, workload_prefix, workload_conn):
+    if not Path(f"{dir_data}/pg_qss_ddl.csv").exists():
+        return []
+
     # Get all the relevant DDL changes that we care about.
     ddl = pd.read_csv(f"{dir_data}/pg_qss_ddl.csv")
     ddl = ddl[(ddl.command == "AlterTableOptions") | (ddl.command == "CreateIndex") | (ddl.command == "DropIndex")]
@@ -120,8 +144,17 @@ def compute_ddl_changes(dir_data, workload_prefix, workload_conn):
 ##################################################################################
 
 def populate_table_feature_states(workload_conn, target_conn, workload_analysis_prefix, output_dir, forward_state, ougc, ddl_changes, tables, qos_windows):
+    logging.root.setLevel(logging.WARN)
+
     valid_tbls = [t for t in tables if (Path(output_dir) / f"scratch/keyspaces/{t}.feather").exists()]
     if not (Path(output_dir) / "scratch/states/done").exists():
+        # Table execution feature frame inputs.
+        exec_feature_dfs = []
+        # Table state feature frame inputs.
+        exec_state_dfs = []
+        # BPM feature frame inputs.
+        bpm_dfs = []
+
         (Path(output_dir) / "scratch/states").mkdir(parents=True, exist_ok=True)
         for i, current_qo in tqdm(enumerate(qos_windows), total=len(qos_windows)): #, leave=False):
             if i != len(qos_windows) - 1:
@@ -138,12 +171,17 @@ def populate_table_feature_states(workload_conn, target_conn, workload_analysis_
             state_forward_sql = """
                 SELECT starget, SUM(is_insert) as num_insert_tuples, SUM(hits) as num_select_tuples,
                        SUM(hits * is_update) as num_update_tuples, SUM(hits * is_delete) as num_delete_tuples,
-                       SUM(is_insert + hits * is_update + hits * is_delete) as num_modify_tuples
+                       SUM(is_insert + hits * is_update + hits * is_delete) as num_modify_tuples,
+                       SUM(is_select) as num_select_queries,
+                       SUM(is_insert) as num_insert_queries,
+                       SUM(is_update) as num_update_queries,
+                       SUM(is_delete) as num_delete_queries
                 FROM (
-                    SELECT starget, is_insert, is_update, is_delete,
+                    SELECT starget, is_insert, is_update, is_delete, is_select,
                            (CASE starget {clauses} ELSE 0 END) as hits
                     FROM (
                         SELECT string_to_table(target, ',') as starget,
+                         (CASE optype WHEN {select_val} THEN 1 ELSE 0 END) as is_select,
 			 (CASE optype WHEN {insert_val} THEN 1 ELSE 0 END) as is_insert,
 			 (CASE optype WHEN {update_val} THEN 1 ELSE 0 END) as is_update,
 			 (CASE optype WHEN {delete_val} THEN 1 ELSE 0 END) as is_delete,
@@ -152,7 +190,10 @@ def populate_table_feature_states(workload_conn, target_conn, workload_analysis_
                         WHERE query_order >= {lower_qo} AND query_order < {upper_qo}
                         ) c
                     ) b GROUP BY starget ORDER BY starget
-            """.format(insert_val=OpType.INSERT.value, update_val=OpType.UPDATE.value, delete_val=OpType.DELETE.value,
+            """.format(select_val=OpType.SELECT.value,
+                       insert_val=OpType.INSERT.value,
+                       update_val=OpType.UPDATE.value,
+                       delete_val=OpType.DELETE.value,
                        prefix=workload_analysis_prefix,
                        tbl_hits=",\n".join([f"{t}_hits" for t in valid_tbls]),
                        clauses="\n".join([f"WHEN '{t}' THEN {t}_hits" for t in valid_tbls]),
@@ -164,19 +205,39 @@ def populate_table_feature_states(workload_conn, target_conn, workload_analysis_
                 "num_select_tuples": r[2],
                 "num_update_tuples": r[3],
                 "num_delete_tuples": r[4],
-                "num_modify_tuples": r[5]
+                "num_modify_tuples": r[5],
+                "num_select_queries": r[6],
+                "num_insert_queries": r[7],
+                "num_update_queries": r[8],
+                "num_delete_queries": r[9],
             } for r in workload_conn.execute(state_forward_sql)]
 
             # Get the table execution features using the window.
-            compute_table_exec_features(ougc, tbl_summaries, i)
-            prior_image = ougc.save_state(i, current_qo, upper_qo)
+            ret_df = compute_table_exec_features(ougc, tbl_summaries, i, output_df=True)
+            if ret_df is not None:
+                exec_feature_dfs.append(ret_df)
 
+            ret_df = ougc.buffer_page_model.inference(ougc.table_feature_state, ougc.table_attr_map, ougc.table_keyspace_features, i, output_df=True)
+            if ret_df is not None:
+                bpm_dfs.append(ret_df)
+
+            # prior_image = ougc.save_state(i, current_qo, upper_qo)
             if not forward_state:
                 # Compute the next stats incarnation
-                compute_next_window_state(ougc)
+                ret_df = compute_next_window_state(ougc, i, output_df=True)
+                if ret_df is not None:
+                    exec_state_dfs.append(ret_df)
 
             # We need to save the state *FROM* before forwarding.
-            joblib.dump(prior_image, f"{output_dir}/scratch/states/{i}.gz")
+            # joblib.dump(prior_image, f"{output_dir}/scratch/states/{i}.gz")
+
+        if len(exec_feature_dfs) > 0:
+            pd.concat(exec_feature_dfs, ignore_index=True).to_feather(f"{output_dir}/scratch/eval_TFM.feather")
+        if len(exec_state_dfs) > 0:
+            pd.concat(exec_state_dfs, ignore_index=True).to_feather(f"{output_dir}/scratch/eval_TSM.feather")
+        if len(bpm_dfs) > 0:
+            pd.concat(bpm_dfs, ignore_index=True).to_feather(f"{output_dir}/scratch/eval_BPM.feather")
+        assert False
         open(f"{output_dir}/scratch/states/done", "w").close()
 
 ##################################################################################
@@ -186,7 +247,9 @@ def populate_table_feature_states(workload_conn, target_conn, workload_analysis_
 def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
          input_dir, session_sql, ou_models_path,
          query_feature_granularity_queries,
+         time_slice_interval, approx_stats,
          table_feature_model_cls, table_feature_model_path,
+         table_state_model_cls, table_state_model_path,
          buffer_page_model_cls, buffer_page_model_path,
          buffer_access_model_cls, buffer_access_model_path,
          concurrency_model_cls, concurrency_model_path,
@@ -206,8 +269,12 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
         "session_sql": session_sql,
         "ou_models_path": ou_models_path,
         "query_feature_granularity_queries": query_feature_granularity_queries,
+        "time_slice_interval": time_slice_interval,
+        "approx_stats": approx_stats,
         "table_feature_model_cls": table_feature_model_cls,
         "table_feature_model_path": table_feature_model_path,
+        "table_state_model_cls": table_state_model_cls,
+        "table_state_model_path": table_state_model_path,
         "buffer_page_model_cls": buffer_page_model_cls,
         "buffer_page_model_path": buffer_page_model_path,
         "buffer_access_model_cls": buffer_access_model_cls,
@@ -228,6 +295,8 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
     # Create a context object for invoking sub functions.
     ougc = OUGenerationContext()
     ougc.table_feature_model = load_model(table_feature_model_path, table_feature_model_cls)
+    ougc.table_state_model = load_model(table_state_model_path, table_state_model_cls)
+    ougc.buffer_page_model = load_model(args["buffer_page_model_path"], args["buffer_page_model_cls"])
     ougc.concurrency_model = load_model(args["concurrency_model_path"], args["concurrency_model_cls"])
     # Start loading the OUGenerationContext with metadata.
     wa = keyspace_metadata_read(input_dir)[0]
@@ -236,13 +305,16 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
 
     with psycopg.connect(workload_analysis_conn) as workload_conn:
         with psycopg.connect(target_db_conn) as target_conn:
+            target_conn.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
+            target_conn.execute("CREATE EXTENSION IF NOT EXISTS qss")
+
             # Get the DDL changes and the initial shared_buffers state.
             ougc.shared_buffers = [r for r in target_conn.execute("SHOW shared_buffers")][0][0]
             ougc.shared_buffers = _parse_field(SettingType.BYTES, ougc.shared_buffers)
 
             # Load the initial state into the OUGenerationContext.
             initial_trigger_metadata(target_conn, ougc)
-            initial_table_feature_state(target_conn, ougc)
+            initial_table_feature_state(target_conn, ougc, approx_stats)
             resolve_index_feature_state(target_conn, ougc)
 
             # Get the query order ranges.
@@ -250,20 +322,35 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
                 r = [r for r in workload_conn.execute(f"SELECT min(query_order), max(query_order) FROM {workload_analysis_prefix}_mw_queries_args")][0]
                 min_qo, max_qo = r[0], r[1]
 
+                r = [r for r in workload_conn.execute(f"SELECT min(unix_timestamp), max(unix_timestamp) FROM {workload_analysis_prefix}_mw_eval_analysis")][0]
+                min_ts, max_ts = r[0], r[1]
+
                 r = [r for r in workload_conn.execute(f"SELECT a.attname FROM pg_attribute a, pg_class c WHERE a.attrelid = c.oid AND c.relname = '{workload_analysis_prefix}_mw_queries_args'")]
                 r = [int(t[0][3:]) for t in r if t[0].startswith("arg")]
                 max_arg = max(r)
 
             # Identify the relevant window boundaries.
             ddl_changes = compute_ddl_changes(input_dir, workload_analysis_prefix, workload_conn)
-            qos_windows = set(range(min_qo, max_qo, query_feature_granularity_queries)) | set([q[0] for q in ddl_changes]) | set([max_qo + 1])
-            qos_windows = sorted(list(qos_windows))
+            if time_slice_interval > 0:
+                timestamps = []
+                while min_ts < max_ts:
+                    timestamps.append(min_ts)
+                    min_ts += time_slice_interval
+                timestamps.append(max_ts)
+                timestamps = timestamps[1:]
+                qos_windows = generate_qos_from_ts(workload_conn, workload_analysis_prefix, timestamps)
+                qos_windows = set([q[1] for q in qos_windows]) | set([q[0] for q in ddl_changes]) | set([min_qo, max_qo + 1])
+                qos_windows = sorted(list(qos_windows))
+            else:
+                qos_windows = set(range(min_qo, max_qo, query_feature_granularity_queries)) | set([q[0] for q in ddl_changes]) | set([max_qo + 1])
+                qos_windows = sorted(list(qos_windows))
 
             # Populate keyspace features.
             populate_keyspace_features(workload_conn, workload_analysis_prefix, output_dir, ougc, qos_windows, histogram_width)
 
             # Populate all the table feature states.
             populate_table_feature_states(workload_conn, target_conn, workload_analysis_prefix, output_dir, forward_state, ougc, ddl_changes, wa.table_attr_map.keys(), qos_windows)
+            assert False
 
     key_fn = lambda k: int(k.split("/")[-1].split(".")[0])
     (Path(output_dir) / "scratch/frames").mkdir(parents=True, exist_ok=True)
@@ -375,6 +462,13 @@ class EvalQueryWorkloadCLI(cli.Application):
         help="Granularity of window slices for table feature, buffer page, and buffer access model in (# queries).",
     )
 
+    time_slice_interval = cli.SwitchAttr(
+        "--time-slice-interval",
+        int,
+        default=0,
+        help="Zero to disable otherwise slice queries by time.",
+    )
+
     table_feature_model_cls =cli.SwitchAttr(
         "--table-feature-model-cls",
         str,
@@ -387,6 +481,20 @@ class EvalQueryWorkloadCLI(cli.Application):
         Path,
         default=None,
         help="Path to the table feature model that should be loaded.",
+    )
+
+    table_state_model_cls =cli.SwitchAttr(
+        "--table-state-model-cls",
+        str,
+        default="TableStateModel",
+        help="Name of the table state model class that should be instantiated.",
+    )
+
+    table_state_model_path = cli.SwitchAttr(
+        "--table-state-model-path",
+        Path,
+        default=None,
+        help="Path to the table state model that should be loaded.",
     )
 
     buffer_page_model_path = cli.SwitchAttr(
@@ -475,6 +583,12 @@ class EvalQueryWorkloadCLI(cli.Application):
         help="Whether to use postgres plan estimates as opposed to row execution feature.",
     )
 
+    approx_stats = cli.Flag(
+        "--approx-stats",
+        default=False,
+        help="Whether to use pgstattuple_approx or not.",
+    )
+
     def main(self):
         main(self.workload_analysis_conn, self.target_db_conn,
              self.workload_analysis_prefix,
@@ -482,8 +596,12 @@ class EvalQueryWorkloadCLI(cli.Application):
              self.session_sql,
              self.ou_models_path,
              self.query_feature_granularity_queries,
+             self.time_slice_interval,
+             self.approx_stats,
              self.table_feature_model_cls,
              self.table_feature_model_path,
+             self.table_state_model_cls,
+             self.table_state_model_path,
              self.buffer_page_model_cls,
              self.buffer_page_model_path,
              self.buffer_access_model_cls,

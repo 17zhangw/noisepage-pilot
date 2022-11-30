@@ -12,7 +12,7 @@ from torch.nn import MSELoss
 from torch.utils.data import dataset
 import torch.nn.functional as F
 from behavior.model_workload.models import construct_stack, MAX_KEYS
-from behavior.model_workload.utils import OpType
+from behavior.model_workload.utils import OpType, Map
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 import shutil
@@ -284,7 +284,69 @@ class AutoMLBufferPageModel():
         return inputs
 
 
-    def inference(self, input_frame):
-        assert False
-        df = pd.DataFrame(input_frame)
-        return np.clip(self.predictor.predict(df), 0, None)
+    def inference(self, table_state, table_attr_map, keyspace_feat_space, window, output_df=None):
+        tbl_ous = {
+            "warehouse": ["ModifyTableUpdate", "IndexScan"],
+            "district": ["ModifyTableUpdate", "IndexScan"],
+            "new_order": ["ModifyTableUpdate", "ModifyTableInsert", "IndexOnlyScan", "IndexScan"],
+            "order_line": ["IndexScan", "ModifyTableInsert", "ModifyTableUpdate"],
+            "oorder": ["IndexScan", "ModifyTableInsert", "ModifyTableUpdate"],
+            "history": ["ModifyTableInsert"],
+            "stock": ["IndexScan", "ModifyTableUpdate"],
+            "customer": ["IndexScan", "ModifyTableUpdate"],
+            "item": ["IndexScan"],
+        }
+
+        inputs = []
+        hist = self.model_args.hist_width
+        for tbl, state in table_state.items():
+            for ou_type in tbl_ous[tbl]:
+                mapping = {
+                    "IndexScan": OpType.SELECT.value,
+                    "IndexOnlyScan": OpType.SELECT.value,
+                    "ModifyTableInsert": OpType.INSERT.value,
+                    "ModifyTableUpdate": OpType.UPDATE.value,
+                    "ModifyTableDelete": OpType.DELETE.value
+                }
+
+                df = None
+                if tbl in keyspace_feat_space:
+                    df = keyspace_feat_space[tbl]
+                    df = df[df.window_index == window]
+                    df = df[df.index_clause.isna()]
+                    df = df[(df.optype == "data") | (df.optype == str(mapping[ou_type]))]
+
+                input_args, key_dists, masks = generate_point_input(self.model_args, Map(table_state[tbl]), df, table_attr_map[tbl], 1.0)
+
+                input_row = {
+                    "free_percent": input_args[0],
+                    "dead_tuple_percent": input_args[1],
+                    "norm_num_pages": input_args[2],
+                    "norm_tuple_count": input_args[3],
+                    "norm_tuple_len_avg": input_args[4],
+                    "target_ff": input_args[5],
+                    "ou_type": ou_type,
+                    "table": tbl,
+                }
+
+                hist_ranges = [
+                    ("data", 0, hist),
+                    ("op", hist, 2 * hist),
+                ]
+
+                keys = table_attr_map[tbl]
+                for colidx, col in enumerate(keys):
+                    if masks[colidx] == 1:
+                        for name, start, end in hist_ranges:
+                            for j in range(start, end):
+                                input_row[f"{tbl}_{col}_{name}_{j % hist}"] = key_dists[colidx][j]
+                inputs.append(input_row)
+
+        inputs = pd.DataFrame(inputs)
+        inputs.fillna(value=0, inplace=True)
+
+        predictions = np.clip(self.predictor.predict(inputs), 0, None)
+
+        inputs["window"] = window
+        inputs["pred_asked_pages_per_tuple"] = predictions
+        return inputs

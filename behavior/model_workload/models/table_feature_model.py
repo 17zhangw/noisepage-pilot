@@ -335,6 +335,7 @@ class TableFeatureModel(nn.Module):
             if t in keyspace_feat_space:
                 df = keyspace_feat_space[t]
                 df = df[df.window_index == window]
+                df = df[df.index_clause.isna()]
 
             input_args, dist_scalers, key_dists, masks = generate_point_input(self.model_args, Map(table_state[t]), df, table_attr_map[t], table_state[t]["target_ff"])
             global_args.append(input_args)
@@ -435,7 +436,7 @@ class AutoMLTableFeatureModel():
             pickle.dump(self.model_args, f)
 
 
-    def inference(self, table_state, table_attr_map, keyspace_feat_space, window):
+    def inference(self, table_state, table_attr_map, keyspace_feat_space, window, output_df=None):
         inputs = []
         tbl_keys = [t for t in table_state]
         for i, t in enumerate(tbl_keys):
@@ -446,6 +447,7 @@ class AutoMLTableFeatureModel():
             if t in keyspace_feat_space:
                 df = keyspace_feat_space[t]
                 df = df[df.window_index == window]
+                df = df[df.index_clause.isna()]
 
             input_args, dist_scalers, key_dists, masks = generate_point_input(self.model_args, Map(table_state[t]), df, table_attr_map[t], table_state[t]["target_ff"])
             input_row = {
@@ -455,6 +457,7 @@ class AutoMLTableFeatureModel():
                 "norm_tuple_count": input_args[3],
                 "norm_tuple_len_avg": input_args[4],
                 "target_ff": input_args[5],
+                "table": t,
             }
 
             hist = self.model_args.hist_width
@@ -485,4 +488,10 @@ class AutoMLTableFeatureModel():
             for j, key in enumerate(MODEL_WORKLOAD_TARGETS):
                 outputs[i][j] = predictions[key].iloc[i]
 
-        return outputs, tbl_keys
+        ret_df = None
+        if output_df:
+            inputs["window"] = window
+            predictions.columns = "pred_" + predictions.columns
+            ret_df = pd.concat([inputs, predictions], axis=1)
+
+        return outputs, tbl_keys, ret_df

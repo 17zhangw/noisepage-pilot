@@ -344,7 +344,7 @@ class AutoMLTableStateModel():
             pickle.dump(self.model_args, f)
 
 
-    def inference(self, table_state, table_attr_map, keyspace_feat_space, window):
+    def inference(self, table_state, table_attr_map, keyspace_feat_space, window, output_df=False):
         inputs = []
         tbl_keys = [t for t in table_state]
         for i, t in enumerate(tbl_keys):
@@ -355,6 +355,7 @@ class AutoMLTableStateModel():
             if t in keyspace_feat_space:
                 df = keyspace_feat_space[t]
                 df = df[df.window_index == window]
+                df = df[df.index_clause.isna()]
 
             input_args, dist_scalers, key_dists, masks = generate_point_input(self.model_args, Map(table_state[t]), df, table_attr_map[t], table_state[t]["target_ff"])
             input_row = {
@@ -373,6 +374,8 @@ class AutoMLTableStateModel():
                 "num_insert_tuples": input_args[11],
                 "num_update_tuples": input_args[12],
                 "num_delete_tuples": input_args[13],
+
+                "table": t,
             }
 
             hist = self.model_args.hist_width
@@ -397,10 +400,18 @@ class AutoMLTableStateModel():
 
         inputs = pd.DataFrame(inputs)
         inputs.fillna(value=0, inplace=True)
-        predictions = np.clip(self.predictor.predict(inputs), 0, 1)
+        predictions = self.predictor.predict(inputs)
+        predictions["next_table_free_percent"] = np.clip(predictions.next_table_free_percent, 0, 1)
+        predictions["next_table_dead_percent"] = np.clip(predictions.next_table_dead_percent, 0, 1)
         outputs = np.zeros((len(tbl_keys), len(STATE_WORKLOAD_TARGETS)))
         for i, _ in enumerate(tbl_keys):
             for j, key in enumerate(STATE_WORKLOAD_TARGETS):
                 outputs[i][j] = predictions[key].iloc[i]
 
-        return outputs, tbl_keys
+        ret_df = None
+        if output_df:
+            inputs["window"] = window
+            predictions.columns = "pred_" + predictions.columns
+            ret_df = pd.concat([inputs, predictions], axis=1)
+
+        return outputs, tbl_keys, ret_df
