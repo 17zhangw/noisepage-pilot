@@ -38,10 +38,10 @@ STATE_WORKLOAD_TARGETS = [
 ]
 
 STATE_WORKLOAD_METRICS = [
-    "root_mean_squared_error",
-    "root_mean_squared_error",
     "mean_absolute_error",
     "mean_absolute_error",
+    "root_mean_squared_error",
+    "root_mean_squared_error",
 ]
 
 MODEL_WORKLOAD_NORMAL_INPUTS = [

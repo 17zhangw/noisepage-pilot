@@ -90,7 +90,7 @@ def task_workload_exec_feature_synthesis():
     """
     Workload Analysis: collect the input feature data for training exec feature model.
     """
-    def workload_exec_feature_synthesis(input_workload, workload_only, psycopg2_conn, work_prefix, buckets, steps, slice_window, offcpu_logwidth, gen_exec_features, gen_data_page_features, gen_concurrency_features):
+    def workload_exec_feature_synthesis(input_workload, workload_only, psycopg2_conn, work_prefix, buckets, steps, slice_window, offcpu_logwidth, gen_exec_features, gen_data_page_features, gen_concurrency_features, generate_vacuum_flag):
         assert input_workload is not None
         assert work_prefix is not None
 
@@ -113,6 +113,8 @@ def task_workload_exec_feature_synthesis():
             eval_args += "--gen-data-page-features "
         if gen_concurrency_features is not None:
             eval_args += "--gen-concurrency-features "
+        if generate_vacuum_flag is not None:
+            eval_args += "--generate-vacuum-flag "
 
         if psycopg2_conn is not None:
             eval_args = eval_args + f"--psycopg2-conn \"{psycopg2_conn}\" "
@@ -124,72 +126,18 @@ def task_workload_exec_feature_synthesis():
         "uptodate": [False],
         "verbosity": VERBOSITY_DEFAULT,
         "params": [
-            {
-                "name": "input_workload",
-                "long": "input_workload",
-                "help": "Path to the input workload that should be analyzed.",
-                "default": None,
-            },
-            {
-                "name": "workload_only",
-                "long": "workload_only",
-                "help": "Whether the input workload is only the workload or not.",
-                "default": False,
-            },
-            {
-                "name": "psycopg2_conn",
-                "long": "psycopg2_conn",
-                "help": "psycopg2 connection string to connect to the valid database instance.",
-                "default": None,
-            },
-            {
-                "name": "work_prefix",
-                "long": "work_prefix",
-                "help": "Prefix to use for working with the database.",
-                "default": None,
-            },
-            {
-                "name": "buckets",
-                "long": "buckets",
-                "help": "Number of buckets to use for bucketizing input data.",
-                "default": 10,
-            },
-            {
-                "name": "steps",
-                "long": "steps",
-                "help": "Summarization steps for concurrency histograms.",
-                "default": "1",
-            },
-            {
-                "name": "slice_window",
-                "long": "slice_window",
-                "help": "Slice window to use.",
-                "default": "1000",
-            },
-            {
-                "name": "offcpu_logwidth",
-                "long": "offcpu_logwidth",
-                "help": "Off CPU Log-width time (# buckets in histogram).",
-                "default": 31,
-            },
-            {
-                "name": "gen_exec_features",
-                "long": "gen_exec_features",
-                "help": "Whether to generate exec features data.",
-                "default": None,
-            },
-            {
-                "name": "gen_data_page_features",
-                "long": "gen_data_page_features",
-                "help": "Whether to generate data page features.",
-                "default": None,
-            },
-            {
-                "name": "gen_concurrency_features",
-                "long": "gen_concurrency_features",
-                "help": "Whether to generate concurrency features.",
-                "default": None,
-            },
+            { "name": "input_workload", "long": "input_workload", "help": "Path to the input workload that should be analyzed.", "default": None, },
+            { "name": "workload_only", "long": "workload_only", "help": "Whether the input workload is only the workload or not.", "default": False, },
+            { "name": "psycopg2_conn", "long": "psycopg2_conn", "help": "psycopg2 connection string to connect to the valid database instance.", "default": None, },
+            { "name": "work_prefix", "long": "work_prefix", "help": "Prefix to use for working with the database.", "default": None, },
+            { "name": "buckets", "long": "buckets", "help": "Number of buckets to use for bucketizing input data.", "default": 10, },
+            { "name": "steps", "long": "steps", "help": "Summarization steps for concurrency histograms.", "default": "1", },
+            { "name": "slice_window", "long": "slice_window", "help": "Slice window to use.", "default": "1000", },
+            { "name": "offcpu_logwidth", "long": "offcpu_logwidth", "help": "Off CPU Log-width time (# buckets in histogram).", "default": 31, },
+            { "name": "gen_exec_features", "long": "gen_exec_features", "help": "Whether to generate exec features data.", "default": None, },
+            { "name": "gen_data_page_features", "long": "gen_data_page_features", "help": "Whether to generate data page features.", "default": None, },
+            { "name": "gen_concurrency_features", "long": "gen_concurrency_features", "help": "Whether to generate concurrency features.", "default": None, },
+            { "name": "generate_vacuum_flag", "long": "generate_vacuum_flag", "help": "Whether to generate the vacuum flag instead of dropping the window.", "default": None, },
         ],
     }
 

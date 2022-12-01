@@ -13,7 +13,7 @@ from behavior.model_workload.utils.data_cardest import load_initial_data, comput
 from behavior.model_workload.utils.workload_analysis import workload_analysis
 
 from behavior.model_workload.utils import keyspace_metadata_read, keyspace_metadata_output
-from behavior.model_workload.utils.keyspace_feature import build_table_exec
+from behavior.model_workload.utils.exec_feature import build_table_exec
 from behavior.model_workload.utils.data_cardest import compute_underspecified
 from behavior.model_workload.utils.eval_analysis import load_eval_windows
 from behavior.utils.process_raw_stats import crunch_raw_data, diff_data
