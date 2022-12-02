@@ -94,7 +94,7 @@ def save_bucket_keys_to_output(output_dir):
 
 
 def fetch_window_indexes(input_dir, slice_window_target, generate_vacuum_flag):
-    vacuum = "flag" if generate_vacuum_flag else "drop"
+    vacuum = "flag" if generate_vacuum_flag else "dropwindow"
     subdir = f"windows/windows_{slice_window_target}_{vacuum}"
     assert (Path(input_dir) / subdir).exists()
 
@@ -108,9 +108,6 @@ def fetch_window_indexes(input_dir, slice_window_target, generate_vacuum_flag):
 # Tables describes the base tables of the workload.
 # all_targets captures all "targets" (this holds the multi-join targets..).
 def build_window_indexes(connection, work_prefix, input_dir, wa, buckets, slice_window, generate_vacuum_flag):
-    if (Path(input_dir) / "windows/done").exists():
-        return
-
     tables = [t for t in wa.table_attr_map.keys()]
     all_targets = list(set(wa.query_table_map.values()))
 
@@ -129,7 +126,7 @@ def build_window_indexes(connection, work_prefix, input_dir, wa, buckets, slice_
         slices = slice_window.split(",")
         for window_slice in slices:
             # Check that we haven't processed it before.
-            vacuum = "flag" if generate_vacuum_flag else "drop"
+            vacuum = "flag" if generate_vacuum_flag else "dropwindow"
             keys_subdir = f"keys/keys_{window_slice}_{vacuum}"
             windows_subdir = f"windows/windows_{window_slice}_{vacuum}"
             if (Path(input_dir) / windows_subdir / "done").exists():
@@ -211,7 +208,6 @@ def build_window_indexes(connection, work_prefix, input_dir, wa, buckets, slice_
         # Let's rollback the index.
         raise Rollback(tx)
 
-    open(f"{input_dir}/windows/done", "w").close()
     logger.info("Finished computing window index map: %s", datetime.now())
     return window_index_map
 
@@ -220,7 +216,8 @@ def build_window_indexes(connection, work_prefix, input_dir, wa, buckets, slice_
 ##################################################################################
 
 def __gen_exec_features(input_dir, connection, work_prefix, wa, buckets, generate_vacuum_flag):
-    if (Path(input_dir) / "exec_features/data/done").exists():
+    vacuum = "flag" if generate_vacuum_flag else "dropwindow"
+    if (Path(input_dir) / "exec_features_{vacuum}/done").exists():
         return
 
     # Compute the window frames.
@@ -229,13 +226,13 @@ def __gen_exec_features(input_dir, connection, work_prefix, wa, buckets, generat
     window_index_map = fetch_window_indexes(input_dir, "query", generate_vacuum_flag)
 
     # Get all the data space features.
-    if not (Path(input_dir) / "exec_features/data/done").exists():
-        (Path(input_dir) / "exec_features/data/").mkdir(parents=True, exist_ok=True)
+    if not (Path(input_dir) / f"exec_features_{vacuum}/done").exists():
+        (Path(input_dir) / f"exec_features_{vacuum}/").mkdir(parents=True, exist_ok=True)
         table_indexname_map = {t: [wa.indexoid_name_map[idxoid] for idxoid, idxt in wa.indexoid_table_map.items() if idxt == t] for t in wa.table_attr_map.keys()}
         data_ks = construct_query_window_stats(logger, connection, work_prefix, wa.table_attr_map.keys(), table_indexname_map, window_index_map, buckets)
         for tbl, df in data_ks.items():
-            df.to_feather(f"{input_dir}/exec_features/data/{tbl}.feather")
-        open(f"{input_dir}/exec_features/data/done", "w").close()
+            df.to_feather(f"{input_dir}/exec_features_{vacuum}/{tbl}.feather")
+        open(f"{input_dir}/exec_features_{vacuum}/done", "w").close()
 
     logger.info("Finished at %s", datetime.now())
 
@@ -336,10 +333,12 @@ def __gen_data_page_features(input_dir, engine, connection, work_prefix, wa, sli
 
     # This is so we can compute multiple slices at once.
     slices = slice_window.split(",")
+    vacuum = "flag" if generate_vacuum_flag else "dropwindow"
     for slice_fragment in slices:
-        if (Path(input_dir) / f"data_page_{slice_fragment}/done").exists():
+        if (Path(input_dir) / f"data_page_{slice_fragment}_{vacuum}/done").exists():
             continue
 
+        (Path(input_dir) / f"data_page_{slice_fragment}_{vacuum}").mkdir(parents=True, exist_ok=True)
         logger.info("Computing data page information for slice: %s", slice_fragment)
         tables = wa.table_attr_map.keys()
         window_index_map = fetch_window_indexes(input_dir, slice_fragment, generate_vacuum_flag)
@@ -356,8 +355,8 @@ def __gen_data_page_features(input_dir, engine, connection, work_prefix, wa, sli
             logger.info("Extracted data returned %s", result.rowcount)
             result = [r for r in result]
             if len(result) > 0:
-                pd.DataFrame(result, columns=DATA_PAGES_COLUMNS).to_feather(f"{input_dir}/data_page_{slice_fragment}/data_{t}.feather")
-        open(f"{input_dir}/data_page_{slice_fragment}/done", "w").close()
+                pd.DataFrame(result, columns=DATA_PAGES_COLUMNS).to_feather(f"{input_dir}/data_page_{slice_fragment}_{vacuum}/data_{t}.feather")
+        open(f"{input_dir}/data_page_{slice_fragment}_{vacuum}/done", "w").close()
 
 
 #def __gen_concurrency_features(input_dir, engine, connection, work_prefix, wa, buckets, concurrency_steps, offcpu_logwidth):
@@ -634,7 +633,7 @@ class ExecFeatureSynthesisCLI(cli.Application):
                            self.gen_exec_features,
                            self.gen_data_page_features,
                            self.gen_concurrency_features,
-                           self.generate_vacuum_flag,)
+                           self.generate_vacuum_flag)
 
             logger.removeHandler(file_handler)
 
