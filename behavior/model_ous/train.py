@@ -77,7 +77,6 @@ def main(
     separate_indkey_features,
     robust,
     log_transform,
-    force_nonincremental,
     trace_inputs,
 ):
     # Load modeling configuration.
@@ -143,8 +142,8 @@ def main(
         logger.info("Begin Training OU: %s", ou_name)
         logger.info("Derived input features for OU: %s (%s)", ou_name, features)
 
-        models = []
-        contains_nonincremental = False
+        loader = OUDataLoader(logger, separate_indkey_features, ou_results, None, True)
+        data = loader.get_next_data()
         for method in config["methods"]:
             model = BehaviorModel(
                 method,
@@ -154,57 +153,22 @@ def main(
                 targets=targets,
             )
 
-            if not model.support_incremental():
-                contains_nonincremental = True
-            models.append(model)
+            logger.info("Fully training (%s, %s)", ou_name, model.method)
+            df_train = data.copy()
+            x_train = df_train[features]
+            y_train = df_train[targets].values
+            del df_train
 
-        if not force_nonincremental:
-            it = 0
-            while df_train is not None:
-                if trace_inputs:
-                    output = output_dir / f"trace/{ou_name}"
-                    output.mkdir(parents=True, exist_ok=True)
-                    df_train.to_feather(f"{output_dir}/trace/{ou_name}/{it}.feather")
+            model.train(x_train, y_train)
 
-                for model in models:
-                    if model.support_incremental():
-                        logger.info("Partially updating (%s, %s) chunk %s", ou_name, model.method, it)
-                        x_train = df_train[features]
-                        y_train = df_train[targets].values
-                        assert x_train.shape[1] != 0 and y_train.shape[1] != 0
-                        model.train(df_train[features], df_train[targets].values)
+            del x_train
+            del y_train
+            gc.collect()
 
-                del df_train
-                df_train = loader.get_next_data()
-                it += 1
-            del loader
-
-        if contains_nonincremental or force_nonincremental:
-            loader = OUDataLoader(logger, separate_indkey_features, ou_results, None, True)
-            data = loader.get_next_data()
-
-            for model in models:
-                if not model.support_incremental() or force_nonincremental:
-                    logger.info("Fully training (%s, %s)", ou_name, model.method)
-
-                    df_train = data.copy()
-                    x_train = df_train[features]
-                    y_train = df_train[targets].values
-                    del df_train
-
-                    model.train(x_train, y_train)
-
-                    del x_train
-                    del y_train
-                    gc.collect()
-            del loader
-
-        for model in models:
             output = output_dir / model.method
             output.mkdir(parents=True, exist_ok=True)
             model.save(output)
-
-        del models
+            del model
         gc.collect()
 
 
@@ -252,11 +216,6 @@ class TrainCLI(cli.Application):
         default=False,
         help="Whether to trace the inputs to the models.",
     )
-    force_nonincremental = cli.Flag(
-        "--force-nonincremental",
-        default=False,
-        help="Whether to force nonincremental training.",
-    )
 
     def main(self):
         main(
@@ -267,7 +226,6 @@ class TrainCLI(cli.Application):
             self.separate_indkey_features,
             self.robust,
             self.log_transform,
-            self.force_nonincremental,
             self.trace_inputs,
         )
 

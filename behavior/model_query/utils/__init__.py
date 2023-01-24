@@ -26,15 +26,15 @@ class OUGenerationContext:
     # Mapping of table -> index oids.
     table_indexoid_map = None
     # Relevant knobs (like shared buffers).
-    shared_buffers = None
+    knobs = None
 
     # This is the state that should be fetched by each worker (such as models).
     ou_models = None
     table_feature_model = None
     table_state_model = None
+    index_feature_model = None
+    index_state_model = None
     buffer_page_model = None
-    buffer_access_model = None
-    concurrency_model = None
     # Mapping of table to keyspace features.
     table_keyspace_features = None
 
@@ -53,7 +53,7 @@ class OUGenerationContext:
             "index_feature_state": self.index_feature_state,
             "indexoid_table_map": self.indexoid_table_map,
             "table_indexoid_map": self.table_indexoid_map,
-            "shared_buffers": self.shared_buffers,
+            "knobs": self.knobs,
         })
 
 
@@ -70,7 +70,7 @@ class OUGenerationContext:
         self.index_feature_state = state["index_feature_state"]
         self.indexoid_table_map = state["indexoid_table_map"]
         self.table_indexoid_map = state["table_indexoid_map"]
-        self.shared_buffers = state["shared_buffers"]
+        self.knobs = state["knobs"]
 
 ##################################################################################
 # Load the Models

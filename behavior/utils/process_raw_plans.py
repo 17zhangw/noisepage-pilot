@@ -172,7 +172,7 @@ def _process_qss_plans(logger, pg_qss_plans, block, extract_ous, table_attr_map=
 
                     if extract_ous:
                         if isinstance(value, list):
-                            # TODO(wz2): For now, we simply featurize a list[] with a numeric length.
+                            # FIXME(LIST): For now, we simply featurize a list[] with a numeric length.
                             # This is likely insufficient if the content of the list matters significantly.
                             key = key + "_len"
                             value = len(value)

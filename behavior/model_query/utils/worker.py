@@ -95,7 +95,8 @@ def prepare_metadata(target_conn, state):
         # Update the KNOBs
         pg_settings["time"] = state.window_index * 1.0 * 1e6
         pg_settings["unix_timestamp"] = state.window_index * 1.0
-        pg_settings["shared_buffers"] = state.shared_buffers
+        for knob, value in state.knobs.items():
+            pg_settings[knob] = value
         pg_settings_total.append(copy.deepcopy(pg_settings))
 
     # Construct the dataframes and process them accordingly.
@@ -221,8 +222,6 @@ def process_window_ous(args, state_file):
         ou_state.ou_models = load_ou_models(args["ou_models_path"])
         ou_state.table_feature_model = load_model(args["table_feature_model_path"], args["table_feature_model_cls"])
         ou_state.buffer_page_model = load_model(args["buffer_page_model_path"], args["buffer_page_model_cls"])
-        ou_state.buffer_access_model = load_model(args["buffer_access_model_path"], args["buffer_access_model_cls"])
-        ou_state.concurrency_model = load_model(args["concurrency_model_path"], args["concurrency_model_cls"])
         ou_state.restore_state(joblib.load(state_file))
 
         # Load the table keyspace features. This can all be loaded only once.
@@ -318,42 +317,3 @@ def process_window_ous(args, state_file):
     query_plans.to_feather(f"{output_dir}/scratch/frames/{window_i}.feather.tmp")
     # Atomic rename to indicate done.
     os.rename(f"{output_dir}/scratch/frames/{window_i}.feather.tmp", f"{output_dir}/scratch/frames/{window_i}.feather")
-
-##################################################################################
-# Bias Concurrency
-##################################################################################
-
-concurrency_state = None
-
-def process_window_concurrency(args, state_file, query_frame_file):
-    global concurrency_state
-    output_dir = args["output_dir"]
-    # Create the OUGenerationContext
-    if concurrency_state is None:
-        concurrency_state = OUGenerationContext()
-        concurrency_state.concurrency_model = load_model(args["concurrency_model_path"], args["concurrency_model_cls"])
-        concurrency_state.restore_state(joblib.load(state_file))
-
-        # Load the table keyspace features. This can all be loaded only once.
-        concurrency_state.table_keyspace_features = {}
-        for t in concurrency_state.tables:
-            if (Path(output_dir) / f"scratch/keyspaces/{t}.feather").exists():
-                concurrency_state.table_keyspace_features[t] = pd.read_feather(f"{output_dir}/scratch/keyspaces/{t}.feather")
-    else:
-        concurrency_state.restore_state(joblib.load(state_file))
-
-    query_frame = pd.read_feather(query_frame_file)
-    window_i = concurrency_state.window_index
-
-    outputs = concurrency_state.concurrency_model.inference(
-        window_i,
-        args["concurrency_mpi"],
-        query_frame,
-        concurrency_state.table_feature_state,
-        concurrency_state.table_attr_map,
-        concurrency_state.table_keyspace_features)
-
-    output_dir = args["output_dir"]
-    query_frame = concurrency_state.concurrency_model.bias(outputs, query_frame)
-    query_frame.to_feather(f"{output_dir}/scratch/concurrency/{window_i}.feather.tmp")
-    os.rename(f"{output_dir}/scratch/concurrency/{window_i}.feather.tmp", f"{output_dir}/scratch/concurrency/{window_i}.feather")

@@ -40,16 +40,18 @@ def prepare_index_input_data(df, nodrop, separate_indkey_features):
         # make sure there are no longer any negative numbers in distinct...
         assert (df[distinct_key] < 0).sum() == 0
 
-    # TODO(wz2): Here we try to encode summary statistics as much as possible.
     slot = [
         "indkey_attlen_",
         "indkey_atttypmod_",
         "indkey_attvarying_",
         "indkey_avg_width_",
 
-        # TODO(wz2): Null Fraction is dropped since there's no good way of representing this.
-        # Models probably also don't need this. Similar reasoning for correlation.
+        # FIXME(STATS): We could arguably compute n_distinct since we *have* the data frames
+        # so in theory we could fake this information out in the catalog by installing what
+        # we understand to be the number of distinct values.
         "indkey_n_distinct_",
+        # FIXME(STATS): Null Fraction is dropped since there's no good way of representing this.
+        # Models probably also don't need this. Similar reasoning for correlation.
         "indkey_null_frac_",
         "indkey_correlation_",
     ]
@@ -112,7 +114,6 @@ def clean_input_data(df, separate_indkey_features, is_train):
     # Remove all features that are blocked.
     blocked = [col for col in df.columns for block in TRAILING_BLOCKED_FEATURES if col.endswith(block)]
 
-    # TODO(wz2): Do we really want to drop all of these?
     # Drop all these additional metadata or useless target columns
     blocked.extend([
         "unix_timestamp",
@@ -166,7 +167,7 @@ def clean_input_data(df, separate_indkey_features, is_train):
         # Clip num_outer_loops such that it is between 1 and None.
         df["IndexScan_num_outer_loops"] = np.clip(df.IndexScan_num_outer_loops, 1, None)
 
-    # TODO(wz2): I think we should drop state variables other than below? Why?
+    # I think we should drop state variables other than below? Why?
     # Because these are transitory and sort of capture the "end" of execution state
     # which will be fundamentally different to when we do inference.
     state_include = ["NumScanKeys", "NumOrderByKeys", "NumRuntimeKeys"]

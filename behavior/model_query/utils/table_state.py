@@ -5,8 +5,10 @@ from math import floor
 from psycopg.rows import dict_row
 from behavior import OperatingUnit
 from behavior.model_workload.utils import OpType
-from behavior.model_workload.models.table_feature_model import MODEL_WORKLOAD_TARGETS
-from behavior.model_workload.models.table_state_model import STATE_WORKLOAD_TARGETS
+from behavior.model_workload.models.table_feature_model import TABLE_FEATURE_TARGETS
+from behavior.model_workload.models.table_state_model import TABLE_STATE_TARGETS
+from behavior.model_workload.models.index_feature_model import INDEX_FEATURE_TARGETS
+from behavior.model_workload.models.index_state_model import INDEX_STATE_TARGETS
 from behavior.model_query.utils.query_ous import mutate_index_state_will_extend
 
 
@@ -78,6 +80,7 @@ def initial_table_feature_state(target_conn, ougc, approx_stats):
                 "tuple_count": result["approx_tuple_count"] if approx_stats else result["tuple_count"],
                 "tuple_len_avg": (result["approx_tuple_len"] / result["approx_tuple_count"]) if approx_stats else (result["tuple_len"] / result["tuple_count"]),
                 "target_ff": ff,
+                "vacuum": 0,
             }
     ougc.table_feature_state = table_feature_state
     ougc.oid_table_map = oid_table_map
@@ -106,14 +109,21 @@ def resolve_index_feature_state(target_conn, ougc):
                 indname = pgi_rec["indrelname"]
                 tblname = pgi_rec["tblname"]
                 if ougc.index_feature_state is None or indexrelid not in ougc.index_feature_state:
-                    result = [r for r in cursor.execute(f"SELECT * FROM pgstattuple('{indname}')", prepare=False)][0]
+                    result = [r for r in cursor.execute(f"SELECT * FROM pgstatindex('{indname}')", prepare=False)][0]
                     new_index_feature_state[indexrelid] = {
                         "indexname": indname,
-                        "num_pages": result["table_len"] / 8192.0,
-                        "tuple_count": result["tuple_count"],
-                        "tuple_len_avg": 0.0 if result["tuple_count"] == 0 else result["tuple_len"] / result["tuple_count"],
-                        "num_inserts": 0,
+                        "tree_level": int(result["tree_level"]),
+                        "num_pages": result["index_size"] / 8192.0,
+                        "leaf_pages": result["leaf_pages"],
                     }
+
+                    result = [r for r in cursor.execute("""
+                        SELECT COUNT(1) as key_natts, SUM(CASE a.attlen WHEN -1 THEN a.atttypmod ELSE a.attlen END) key_size
+                          FROM pg_attribute a, pg_index i
+                         WHERE i.indexrelid = {indexrelid} AND a.attrelid = i.indrelid AND a.attnum IN ANY(i.indkey)
+                        """.format(indexrelid=indexrelid), prepare=False)][0]
+                    new_index_feature_state[indexrelid]["key_natts"] = result["key_natts"]
+                    new_index_feature_state[indexrelid]["key_size"] = result["key_size"]
                 else:
                     new_index_feature_state[indexrelid] = ougc.index_feature_state[indexrelid]
 
@@ -169,16 +179,39 @@ def compute_table_exec_features(ougc, tbl_summaries, window, output_df=False):
     if ougc.table_feature_model is None:
         for t in ougc.table_feature_state:
             # By default, assume "default" behavior.
-            for target in MODEL_WORKLOAD_TARGETS:
+            for target in TABLE_FEATURE_TARGETS:
                 ougc.table_feature_state[t][target] = 0.0
 
         return None
     else:
         with torch.no_grad():
-            outputs, tbls, ret_df = ougc.table_feature_model.inference(ougc.table_feature_state, ougc.table_attr_map, ougc.table_keyspace_features, window, output_df=output_df)
+            tbls, outputs, ret_df = ougc.table_feature_model.inference(ougc.table_feature_state, ougc.table_attr_map, ougc.table_keyspace_features, window, output_df=output_df)
             for i, t in enumerate(tbls):
-                for out, target in enumerate(MODEL_WORKLOAD_TARGETS):
+                for out, target in enumerate(TABLE_FEATURE_TARGETS):
                     ougc.table_feature_state[t][target] = outputs[i][out]
+            return ret_df
+
+
+def compute_index_exec_features(ougc, window, output_df=False):
+    """
+    Computes the index execution features.
+    """
+
+    for _, tbl_state in ougc.table_feature_state.items():
+        # Compute number of index inserts in expectation.
+        tbl_state["num_index_inserts"] = tbl_state["num_insert_tuples"] + tbl_state["num_update_tuples"] * (1.0 - tbl_state["hot_percent"])
+
+    if ougc.index_feature_model is None:
+        for idx in ougc.index_feature_state:
+            for target in INDEX_FEATURE_TARGETS:
+                ougc.index_feature_state[idx][target] = 0.0
+        return None
+    else:
+        with torch.no_grad():
+            idx_keys, outputs, ret_df = ougc.index_feature_model.inference(ougc, window, output_df=output_df)
+            for i, idx in enumerate(idx_keys):
+                for out, target in enumerate(INDEX_FEATURE_TARGETS):
+                    ougc.index_feature_state[idx][target] = outputs[i][out]
             return ret_df
 
 
@@ -186,9 +219,9 @@ def compute_next_window_state(ougc, window, output_df=False):
     predicted_state = {t: {} for t in ougc.table_attr_map.keys()}
     if ougc.table_state_model is not None:
         with torch.no_grad():
-            outputs, tbls, ret_df = ougc.table_state_model.inference(ougc.table_feature_state, ougc.table_attr_map, ougc.table_keyspace_features, window, output_df=output_df)
+            tbls, outputs, ret_df = ougc.table_state_model.inference(ougc.table_feature_state, ougc.table_attr_map, ougc.table_keyspace_features, window, output_df=output_df)
             for i, t in enumerate(tbls):
-                for out, target in enumerate(STATE_WORKLOAD_TARGETS):
+                for out, (target, _, _) in enumerate(TABLE_STATE_TARGETS):
                     predicted_state[t][target] = outputs[i][out]
     else:
         ret_df = None
@@ -212,11 +245,13 @@ def compute_next_window_state(ougc, window, output_df=False):
         est_new_pages = tbl_state["num_pages"] + floor((ins_insert + ins_update) * tbl_state["extend_percent"])
 
         if ougc.table_state_model is not None:
-            # Try to stabilize the result. Assume est_tuple_count is the upper bound.
-            est_tuple_count = max(tbl_state["tuple_count"] - tbl_state["num_delete_tuples"], predicted_state[tbl]["next_table_num_tuples"])
+            # Try to stabilize the result. Assume est_tuple_count + insert is the upper bound.
+            # And that est_tuple_count - delete is the lower bound.
+            est_tuple_count = max(tbl_state["tuple_count"] - tbl_state["num_delete_tuples"], predicted_state[tbl]["next_table_tuple_count"])
             est_tuple_count = min(tbl_state["tuple_count"] + tbl_state["num_insert_tuples"], est_tuple_count)
 
         if ougc.table_state_model is not None:
+            # Use this as the upper bound.
             worst_new_pages = tbl_state["num_pages"] + floor((ins_insert + ins_update) * tbl_state["extend_percent"])
             est_new_pages = predicted_state[tbl]["next_table_num_pages"]
             est_new_pages = min(worst_new_pages, est_new_pages)
@@ -224,16 +259,9 @@ def compute_next_window_state(ougc, window, output_df=False):
         tbl_state["num_pages"] = est_new_pages
         tbl_state["tuple_count"] = est_tuple_count
 
-        #for indexoid, relname in ougc.indexoid_table_map.items():
-        #    if relname == tbl:
-        #        idx_state = ougc.index_feature_state[indexoid]
-        #        for _ in range(ins_insert + ins_update):
-        #            idx_state["tuple_count"] += 1
-        #            idx_state["num_pages"] += mutate_index_state_will_extend(idx_state)
-
     # FIXME(VACUUM): Without a VACUUM model or some analytical setup, we can't wipe the dead tuple percents out.
     # This generally forces into a state where dead rises and free shrinks...does it matter though?
-    # FIXME(STATS): There is no intuition of how tuple_len_avg will change over time nor any sense of defrags.
+
     for tbl, tbl_state in ougc.table_feature_state.items():
         new_dead_tuples = prev_dead_tuples[tbl] + tbl_state["num_delete_tuples"] + tbl_state["num_update_tuples"]
         est_dead_tuple_percent = max(0.0, min(1.0, new_dead_tuples * tbl_state["tuple_len_avg"] / (tbl_state["num_pages"] * 8192.0)))
@@ -241,15 +269,58 @@ def compute_next_window_state(ougc, window, output_df=False):
 
         if ougc.table_state_model is not None:
             # Yoink from model if available.
-            est_dead_tuple_percent = predicted_state[tbl]["next_table_dead_percent"]
+            est_dead_tuple_percent = predicted_state[tbl]["next_table_dead_tuple_percent"]
             est_free_tuple_percent = predicted_state[tbl]["next_table_free_percent"]
 
         # Adjust these to be from 0-100%
         tbl_state["dead_tuple_percent"] = est_dead_tuple_percent * 100.0
         tbl_state["free_percent"] = est_free_tuple_percent * 100.0
 
-        # Estimate the tuple len average from how much is live to how many tuples in table.
+        # FIXME(STATS): There is no intuition of how tuple_len_avg will change over time nor any sense of defrags.
         # est_live_tuple_percent = max(0.0, min(1.0, 1 - est_dead_tuple_percent - est_free_tuple_percent))
         # tbl_state["tuple_len_avg"] = (tbl_state["num_pages"] * 8192.0 * est_live_tuple_percent) / (tbl_state["tuple_count"])
+
+    return ret_df
+
+
+def compute_next_index_window_state(ougc, window, output_df=False):
+    predicted_state = {idx: {} for idx in ougc.index_feature_state.keys()}
+    if ougc.table_state_model is not None:
+        with torch.no_grad():
+            idx_keys, outputs, ret_df = ougc.index_state_model.inference(ougc, window, output_df=output_df)
+            for i, idx in enumerate(ougc.index_feature_state.keys()):
+                for out, (target, _, _) in enumerate(INDEX_STATE_TARGETS):
+                    predicted_state[t][target] = outputs[i][out]
+    else:
+        ret_df = None
+
+    for idx, idx_state in ougc.index_feature_state.items():
+        assert idx in predicted_state
+        tbl_state = ougc.table_feature_state[ougc.indexoid_table_map[idx]]
+
+        num_splits = tbl_state["num_index_inserts"] * idx_state["split_percent"]
+        num_extends = tbl_state["num_index_inserts"] * idx_state["extend_percent"]
+        # Assume that num_extends is the number of new pages.
+        delta_new_pages = num_extends
+        # Assume that anything not accounted for is taken from empty or dead pages.
+        delta_empty_pages = min(idx_state["empty_pages"], num_splits - num_extends)
+        delta_deleted_pages = min(idx_state["deleted_pages"], num_splits - num_extends - delta_empty_pages)
+
+        if idx not in predicted_state:
+            # Assume that the tree level must increase.
+            idx["tree_level"] = max(idx["tree_level"], predicted_state[idx]["next_tree_level"])
+            idx["avg_leaf_density"] = predicted_state[idx]["next_avg_leaf_density"]
+            idx["num_pages"] = predicted_state[idx]["next_num_pages"]
+            idx["leaf_pages"] = predicted_state[idx]["next_leaf_pages"]
+            idx["empty_pages"] = predicted_state[idx]["next_empty_pages"]
+            idx["deleted_pages"] = predicted_state[idx]["next_deleted_pages"]
+        else:
+            # Assume that tree level and leaf density stay the same.
+            idx["num_pages"] += delta_new_pages
+            # Assume that they are all leaf pages.
+            idx["leaf_pages"] += delta_new_pages
+            idx["empty_pages"] -= delta_empty_pages
+            # No judgement can really be made about density or increasing quantities...
+            idx["deleted_pages"] -= delta_deleted_pages
 
     return ret_df

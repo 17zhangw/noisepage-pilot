@@ -17,22 +17,44 @@ from behavior.utils.process_pg_state_csvs import postgres_julian_to_unix
 from behavior.model_workload.utils import keyspace_metadata_read
 from behavior.model_workload.utils.keyspace_feature import construct_keyspaces
 from behavior.model_query.utils.query_ous import generate_query_ous_window
-from behavior.model_query.utils.buffer_ous import compute_buffer_page_features, compute_buffer_access_features
+from behavior.model_query.utils.buffer_ous import instantiate_buffer_page_reqs, compute_buffer_page_features, compute_buffer_access_features
 from behavior.model_query.utils.table_state import (
     initial_trigger_metadata,
     initial_table_feature_state,
     refresh_table_fillfactor,
     resolve_index_feature_state,
     compute_table_exec_features,
+    compute_index_exec_features,
     compute_next_window_state,
+    compute_next_index_window_state,
 )
 
 from behavior.model_workload.utils import OpType
 from behavior.model_query.utils import OUGenerationContext, load_ou_models, load_model
-from behavior.model_query.utils.worker import process_window_ous, process_window_concurrency
+from behavior.model_query.utils.worker import process_window_ous
 
 
 logger = logging.getLogger(__name__)
+
+##################################################################################
+# Scrape the knob state.
+##################################################################################
+
+def scrape_knobs(connection, ougc):
+    knobs = {
+        "autovacuum": SettingType.BOOLEAN,
+        "autovacuum_max_workers": SettingType.INTEGER,
+        "autovacuum_naptime": SettingType.INTEGER_TIME,
+        "autovacuum_vacuum_threshold": SettingType.INTEGER,
+        "autovacuum_vacuum_insert_threshold": SettingType.INTEGER,
+        "autovacuum_vacuum_scale_factor": SettingType.FLOAT,
+        "autovacuum_vacuum_insert_scale_factor": SettingType.FLOAT,
+        "shared_buffers": SettingTYpe.BYTES,
+    }
+
+    for knobname, knobtype in knobs:
+        knobvalue = [r for r in connection.execute(f"SHOW {knobnmae}")][0][0]
+        ougc.knobs[knobname] = _parse_field(knobtype, knobvalue)
 
 ##################################################################################
 # Generate the keyspace features.
@@ -102,8 +124,7 @@ def advance_ddl_change(ddl_changes, target_conn, ougc, current_qo):
             resolve_index_feature_state(target_conn, ougc)
 
             # Refresh any relevant settings.
-            ougc.shared_buffers = [r for r in target_conn.execute("SHOW shared_buffers")][0][0]
-            ougc.shared_buffers = _parse_field(SettingType.BYTES, ougc.shared_buffers)
+            scrape_knobs(target_conn, ougc)
 
 
 def compute_ddl_changes(dir_data, workload_prefix, workload_conn):
@@ -140,15 +161,19 @@ def compute_ddl_changes(dir_data, workload_prefix, workload_conn):
 # Populate the table feature states.
 ##################################################################################
 
-def populate_table_feature_states(workload_conn, target_conn, workload_analysis_prefix, output_dir, forward_state, ougc, ddl_changes, tables, qos_windows):
+def populate_table_feature_states(workload_conn, target_conn, workload_analysis_prefix,
+                                  output_dir, forward_state, estimate_vacuum, use_vacuum_flag,
+                                  ougc, ddl_changes, tables, qos_windows):
     logging.root.setLevel(logging.WARN)
 
     valid_tbls = [t for t in tables if (Path(output_dir) / f"scratch/keyspaces/{t}.feather").exists()]
     if not (Path(output_dir) / "scratch/states/done").exists():
         # Table execution feature frame inputs.
         exec_feature_dfs = []
+        index_exec_feature_dfs = []
         # Table state feature frame inputs.
         exec_state_dfs = []
+        index_exec_state_dfs = []
         # BPM feature frame inputs.
         bpm_dfs = []
 
@@ -214,27 +239,45 @@ def populate_table_feature_states(workload_conn, target_conn, workload_analysis_
             if ret_df is not None:
                 exec_feature_dfs.append(ret_df)
 
-            ret_df = ougc.buffer_page_model.inference(ougc.table_feature_state, ougc.table_attr_map, ougc.table_keyspace_features, i, output_df=True)
+            # Get the index execution features.
+            ret_df = compute_index_exec_features(ougc, i, output_df=True)
+            if ret_df is not None:
+                index_exec_feature_dfs.append(ret_df)
+
+            # Populate the buffer pages/OU used during this window.
+            ret_df = instantiate_buffer_page_reqs(ougc, i)
             if ret_df is not None:
                 bpm_dfs.append(ret_df)
 
-            # prior_image = ougc.save_state(i, current_qo, upper_qo)
+            # TODO: Compute the vacuum flag here...!
+
+            # We need to save the state *FROM* before forwarding.
+            prior_image = ougc.save_state(i, current_qo, upper_qo)
+            joblib.dump(prior_image, f"{output_dir}/scratch/states/{i}.gz")
+
+            # Now consider forwarding the state.
             if not forward_state:
+                # TODO: Incorporate the feedback from the vacuum above.
+                # First compute the new index state since we want the old state still.
+                ret_df = compute_next_index_window_state(ougc, i, output_df=True)
+                if ret_df is not None:
+                    index_exec_state_dfs.append(ret_df)
+
                 # Compute the next stats incarnation
                 ret_df = compute_next_window_state(ougc, i, output_df=True)
                 if ret_df is not None:
                     exec_state_dfs.append(ret_df)
 
-            # We need to save the state *FROM* before forwarding.
-            # joblib.dump(prior_image, f"{output_dir}/scratch/states/{i}.gz")
-
         if len(exec_feature_dfs) > 0:
             pd.concat(exec_feature_dfs, ignore_index=True).to_feather(f"{output_dir}/scratch/eval_TFM.feather")
+        if len(index_exec_feature_dfs) > 0:
+            pd.concat(index_exec_feature_dfs, ignore_index=True).to_feather(f"{output_dir}/scratch/eval_IFM.feather")
         if len(exec_state_dfs) > 0:
             pd.concat(exec_state_dfs, ignore_index=True).to_feather(f"{output_dir}/scratch/eval_TSM.feather")
+        if len(index_exec_state_dfs) > 0:
+            pd.concat(index_exec_state_dfs, ignore_index=True).to_feather(f"{output_dir}/scratch/eval_ISM.feather")
         if len(bpm_dfs) > 0:
             pd.concat(bpm_dfs, ignore_index=True).to_feather(f"{output_dir}/scratch/eval_BPM.feather")
-        assert False
         open(f"{output_dir}/scratch/states/done", "w").close()
 
 ##################################################################################
@@ -245,12 +288,13 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
          input_dir, session_sql, ou_models_path,
          query_feature_granularity_queries,
          time_slice_interval, approx_stats,
+         estimate_vacuum, use_vacuum_flag,
          table_feature_model_cls, table_feature_model_path,
          table_state_model_cls, table_state_model_path,
+         index_feature_model_cls, index_feature_model_path,
+         index_state_model_cls, index_state_model_path,
          buffer_page_model_cls, buffer_page_model_path,
          buffer_access_model_cls, buffer_access_model_path,
-         concurrency_model_cls, concurrency_model_path,
-         concurrency_mpi,
          histogram_width,
          forward_state,
          use_plan_estimates,
@@ -268,17 +312,18 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
         "query_feature_granularity_queries": query_feature_granularity_queries,
         "time_slice_interval": time_slice_interval,
         "approx_stats": approx_stats,
+        "estimate_vacuum": estimate_vacuum,
+        "use_vacuum_flag": use_vacuum_flag,
         "table_feature_model_cls": table_feature_model_cls,
         "table_feature_model_path": table_feature_model_path,
         "table_state_model_cls": table_state_model_cls,
         "table_state_model_path": table_state_model_path,
+        "index_feature_model_cls": index_feature_model_cls,
+        "index_feature_model_path": index_feature_model_path,
+        "index_state_model_cls": index_state_model_cls,
+        "index_state_model_path": index_state_model_path,
         "buffer_page_model_cls": buffer_page_model_cls,
         "buffer_page_model_path": buffer_page_model_path,
-        "buffer_access_model_cls": buffer_access_model_cls,
-        "buffer_access_model_path": buffer_access_model_path,
-        "concurrency_model_cls": concurrency_model_cls,
-        "concurrency_model_path": concurrency_model_path,
-        "concurrency_mpi": concurrency_mpi,
         "histogram_width": histogram_width,
         "use_plan_estimates": use_plan_estimates,
         "output_dir": output_dir,
@@ -293,8 +338,9 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
     ougc = OUGenerationContext()
     ougc.table_feature_model = load_model(table_feature_model_path, table_feature_model_cls)
     ougc.table_state_model = load_model(table_state_model_path, table_state_model_cls)
-    ougc.buffer_page_model = load_model(args["buffer_page_model_path"], args["buffer_page_model_cls"])
-    ougc.concurrency_model = load_model(args["concurrency_model_path"], args["concurrency_model_cls"])
+    ougc.buffer_page_model = load_model(buffer_page_model_path, buffer_page_model_cls)
+    ougc.index_feature_model = load_model(index_feature_model_path, index_feature_model_cls)
+    ougc.index_state_model = load_model(index_state_model_path, index_state_model_cls)
     # Start loading the OUGenerationContext with metadata.
     wa = keyspace_metadata_read(input_dir)[0]
     ougc.tables = list(wa.table_attr_map.keys())
@@ -309,8 +355,7 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
                 target_conn.execute("CREATE EXTENSION IF NOT EXISTS qss")
 
             # Get the DDL changes and the initial shared_buffers state.
-            ougc.shared_buffers = [r for r in target_conn.execute("SHOW shared_buffers")][0][0]
-            ougc.shared_buffers = _parse_field(SettingType.BYTES, ougc.shared_buffers)
+            scrape_knobs(target_conn, ougc)
 
             # Load the initial state into the OUGenerationContext.
             initial_trigger_metadata(target_conn, ougc)
@@ -349,8 +394,7 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
             populate_keyspace_features(workload_conn, workload_analysis_prefix, output_dir, ougc, qos_windows, histogram_width)
 
             # Populate all the table feature states.
-            populate_table_feature_states(workload_conn, target_conn, workload_analysis_prefix, output_dir, forward_state, ougc, ddl_changes, wa.table_attr_map.keys(), qos_windows)
-            assert False
+            populate_table_feature_states(workload_conn, target_conn, workload_analysis_prefix, output_dir, forward_state, estimate_vacuum, use_vacuum_flag, ougc, ddl_changes, wa.table_attr_map.keys(), qos_windows)
 
     key_fn = lambda k: int(k.split("/")[-1].split(".")[0])
     (Path(output_dir) / "scratch/frames").mkdir(parents=True, exist_ok=True)
@@ -382,34 +426,10 @@ def main(workload_analysis_conn, target_db_conn, workload_analysis_prefix,
                     dispatch_range(last_i, i)
         open(f"{output_dir}/scratch/ous/done", "w").close()
 
-    if ougc.concurrency_model is None:
-        # The output directory is the resolved directory.
-        if (Path(output_dir) / "evals").exists():
-            os.remove(f"{output_dir}/evals")
-        os.symlink(f"{output_dir}/scratch/frames", f"{output_dir}/evals")
-    else:
-        (Path(output_dir) / "evals").mkdir(parents=True, exist_ok=True)
-        # FIXME(TIME_SLICE): There is a reality where we should slice based on elapsed time.
-        # However, that would require finding a way to estimate the number of concurrent
-        # terminals in a time slice. It's possible that if you're given a [start_time]
-        # you can compute the # overlapping...
-        assert concurrency_mpi is not None
-
-        # Generate the state/frame pairs and assert them.
-        key_fn = lambda x: int(x.split("/")[-1].split(".")[0])
-        states = sorted(glob.glob(f"{output_dir}/scratch/states/*.gz"), key=key_fn)
-        options = sorted(glob.glob(f"{output_dir}/scratch/frames/*.feather"), key=key_fn)
-        operations = [(s, o) for s, o in zip(states, options) if not Path(f"{output_dir}/scratch/concurrency/{key_fn(s)}.feather").exists()]
-        for s, o in operations:
-            assert key_fn(s) == key_fn(o)
-
-        with joblib.parallel_backend(backend="loky", inner_max_num_threads=num_threads):
-            with joblib.Parallel(n_jobs=num_cpus, verbose=10) as parallel:
-                parallel(joblib.delayed(process_window_concurrency)(args, s, o) for s, o in operations)
-
-        if (Path(output_dir) / "evals").exists():
-            os.remove(f"{output_dir}/evals")
-        os.symlink(f"{output_dir}/scratch/concurrency", f"{output_dir}/evals")
+    # The output directory is the resolved directory.
+    if (Path(output_dir) / "evals").exists():
+        os.remove(f"{output_dir}/evals")
+    os.symlink(f"{output_dir}/scratch/frames", f"{output_dir}/evals")
 
 
 class EvalQueryWorkloadCLI(cli.Application):
@@ -472,7 +492,7 @@ class EvalQueryWorkloadCLI(cli.Application):
     table_feature_model_cls =cli.SwitchAttr(
         "--table-feature-model-cls",
         str,
-        default="TableFeatureModel",
+        default="AutoMLTableFeatureModel",
         help="Name of the table feature model class that should be instantiated.",
     )
 
@@ -486,7 +506,7 @@ class EvalQueryWorkloadCLI(cli.Application):
     table_state_model_cls =cli.SwitchAttr(
         "--table-state-model-cls",
         str,
-        default="TableStateModel",
+        default="AutoMLTableStateModel",
         help="Name of the table state model class that should be instantiated.",
     )
 
@@ -507,43 +527,36 @@ class EvalQueryWorkloadCLI(cli.Application):
     buffer_page_model_cls = cli.SwitchAttr(
         "--buffer-page-model-cls",
         str,
-        default="BufferPageModel",
+        default="AutomLBufferPageModel",
         help="Name of the buffer page model class that should be instantiated.",
     )
 
-    buffer_access_model_cls = cli.SwitchAttr(
-        "--buffer-access-model-cls",
+    index_feature_model_cls = cli.SwitchAttr(
+        "--index-feature-model-cls",
         str,
-        default="BufferAccessModel",
-        help="Name of the buffer access model class that should be instantiated.",
+        default="AutoMLIndexFeatureModel",
+        help="Name of the index feature model class that should be instantiated.",
     )
 
-    buffer_access_model_path = cli.SwitchAttr(
-        "--buffer-access-model-path",
+    index_feature_model_path = cli.SwitchAttr(
+        "--index-feature-model-path",
         Path,
         default=None,
-        help="Path to the buffer access model that should be loaded.",
+        help="Path to the index feature model that should be loaded.",
     )
 
-    concurrency_model_cls = cli.SwitchAttr(
-        "--concurrency-model-cls",
+    index_state_model_cls = cli.SwitchAttr(
+        "--index-state-model-cls",
         str,
-        default="ConcurrencyModel",
-        help="Name of the concurrency model class that should be instantiated.",
+        default="AutoMLIndexFeatureModel",
+        help="Name of the index state model class that should be instantiated.",
     )
 
-    concurrency_model_path = cli.SwitchAttr(
-        "--concurrency-model-path",
+    index_state_model_path = cli.SwitchAttr(
+        "--index-state-model-path",
         Path,
         default=None,
-        help="Path to the concurrency model that should be loaded.",
-    )
-
-    concurrency_mpi = cli.SwitchAttr(
-        "--concurrency-mpi",
-        int,
-        default=None,
-        help="MPI of concurrency to use for evaluation.",
+        help="Path to the index state model that should be loaded.",
     )
 
     workload_analysis_conn = cli.SwitchAttr(
@@ -589,6 +602,18 @@ class EvalQueryWorkloadCLI(cli.Application):
         help="Whether to use pgstattuple_approx or not.",
     )
 
+    estimate_vacuum = cli.Flag(
+        "--estimate-vacuum",
+        default=False,
+        help="Whether to perform analytical vacuum estimation or not.",
+    )
+
+    use_vaccum_flag = cli.Flag(
+        "--use-vacuum-flag",
+        default=False,
+        help="Whether to use the vacuum flag with the table state model.",
+    )
+
     def main(self):
         main(self.workload_analysis_conn, self.target_db_conn,
              self.workload_analysis_prefix,
@@ -598,17 +623,18 @@ class EvalQueryWorkloadCLI(cli.Application):
              self.query_feature_granularity_queries,
              self.time_slice_interval,
              self.approx_stats,
+             self.estimate_vacuum,
+             self.use_vacuum_flag,
              self.table_feature_model_cls,
              self.table_feature_model_path,
              self.table_state_model_cls,
              self.table_state_model_path,
+             self.index_feature_model_cls,
+             self.index_feature_model_path,
+             self.index_state_model_cls,
+             self.index_state_model_path,
              self.buffer_page_model_cls,
              self.buffer_page_model_path,
-             self.buffer_access_model_cls,
-             self.buffer_access_model_path,
-             self.concurrency_model_cls,
-             self.concurrency_model_path,
-             self.concurrency_mpi,
              self.histogram_width,
              self.forward_state,
              self.use_plan_estimates,

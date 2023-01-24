@@ -11,56 +11,68 @@ import torch.nn as nn
 from torch.nn import MSELoss
 from torch.utils.data import dataset
 import torch.nn.functional as F
-from behavior.model_workload.models import construct_stack, MAX_KEYS
+from behavior.model_workload.models import MAX_KEYS
 from behavior.model_workload.utils import OpType, Map
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 import shutil
 
-try:
-    from autogluon.tabular import TabularDataset, TabularPredictor
-    from behavior.model_workload.models.multilabel_predictor import MultilabelPredictor
-except:
-    pass
+from autogluon.tabular import TabularDataset, TabularPredictor
+from behavior.model_workload.models.multilabel_predictor import MultilabelPredictor
+from behavior.model_workload.models.utils import identify_key_size
 
-try:
-    from supervised.automl import AutoML
-except:
-    pass
+from behavior import OperatingUnit
 
+SUPPORTED_OUS_MAPPING = {
+    OperatingUnit.IndexScan.name: OpType.SELECT.value,
+    OperatingUnit.IndexOnlyScan.name: OpType.SELECT.value,
+    OperatingUnit.SeqScan.name: OpType.SELECT.value,
+    OperatingUnit.ModifyTableInsert: OpType.INSERT.value,
+    OperatingUnit.ModifyTableUpdate: OpType.UPDATE.value,
+    OperatingUnit.ModifyTableDelete: OpType.DELETE.value,
+}
 
-MODEL_WORKLOAD_NORMAL_INPUTS = [
+BUFFER_PAGE_INPUTS = [
     "free_percent",
     "dead_tuple_percent",
-    "norm_num_pages",
-    "norm_tuple_count",
-    "norm_tuple_len_avg",
+    "num_pages",
+    "tuple_count",
+    "tuple_len_avg",
     "target_ff",
+
+    "index_key_natts",
+    "index_key_size",
+    "index_tree_level",
+    "index_num_pages",
+    "index_leaf_pages",
 ]
 
-MODEL_WORKLOAD_TARGETS = [
+BUFFER_PAGE_TARGETS = [
     "asked_pages_per_tuple",
 ]
 
-MODEL_WORKLOAD_METRICS = [
-    "root_mean_squared_error",
+BUFFER_PAGE_METRICS = [
+    "mean_squared_error",
 ]
 
-def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
+def generate_point_input(model_args, input_row, df, identity, tbl_attr_keys, ff_value):
     hist_width = model_args.hist_width
-    # Construct the augmented inputs.
-    num_inputs = len(MODEL_WORKLOAD_NORMAL_INPUTS)
-    input_args = np.zeros(num_inputs)
-    input_args[0] = (input_row.free_percent if "free_percent" in input_row else input_row.approx_free_percent) / 100.0
-    input_args[1] = input_row.dead_tuple_percent / 100.0
-    input_args[2] = input_row.norm_num_pages
-    input_args[3] = input_row.norm_tuple_count
-    input_args[4] = input_row.norm_tuple_len_avg
-    input_args[5] = ff_value
+    row = {
+        "free_percent": (input_row.free_percent if "free_percent" in input_row else input_row.approx_free_percent) / 100.0,
+        "dead_tuple_percent": input_row.dead_tuple_percent / 100.0,
+        "num_pages": input_row.num_page,
+        "tuple_count": input_row.tuple_count,
+        "tuple_len_avg": input_row.tuple_len_avg,
+        "target_ff": ff_value,
+
+        "index_key_natts": input_row.index_key_natts if "index_key_natts" in input_row else 0,
+        "index_key_size": input_row.index_key_size if "index_key_size" in input_row else 0,
+        "index_tree_level": input_row.index_tree_level if "index_tree_level" in input_row else 0,
+        "index_num_pages": input_row.index_num_pages if "index_num_pages" in input_row else 0,
+        "index_leaf_pages": input_row.index_leaf_pages if "index_leaf_pages" in input_row else 0,
+    }
 
     # Construct key dists.
-    key_dists = np.zeros((MAX_KEYS, 2 * hist_width))
-    masks = np.zeros((MAX_KEYS, 1))
     seen = []
     if df is not None and "att_name" in df:
         for ig in df.itertuples():
@@ -73,15 +85,22 @@ def generate_point_input(model_args, input_row, df, tbl_attr_keys, ff_value):
             assert (ig.optype, j) not in seen
             seen.append((ig.optype, j))
 
-            if ig.optype == "data":
-                key_dists[j][0:hist_width] = np.array([float(f) for f in ig.key_dist.split(",")])
-            else:
-                key_dists[j][hist_width:] = np.array([float(f) for f in ig.key_dist.split(",")])
-            masks[j] = 1
-    return input_args, key_dists, masks
+            col = tbl_attr_keys[j]
+            name = ig.optype
+            if not (ig.optype == "data" or ig.optype == "SELECT" or ig.optype == "INSERT" or ig.optype == "UPDATE" or ig.optype == "DELETE"):
+                name = OpType(int(ig.optype)).name
+
+            name = name.lower()
+            key_dist = [float(f) for f in ig.key_dist.split(",")]
+            for i in range(0, hist_width):
+                if model_args.keep_identity:
+                    row[f"{identity}_{col}_{name}_{i}"] = key_dist[i]
+                else:
+                    row[f"key{j}_{name}_{i}"] = key_dist[i]
+    return row
 
 
-def generate_automl_dataset(logger, model_args):
+def generate_dataset(logger, model_args):
     tbl_attr_keys = {}
     # Construct the table attr mappings.
     for d in model_args.input_dirs:
@@ -94,11 +113,7 @@ def generate_automl_dataset(logger, model_args):
             if t not in tbl_attr_keys:
                 tbl_attr_keys[t] = k
 
-    global_args = []
-    global_catargs = []
-    global_dists = []
-    global_masks = []
-    global_targets = []
+    input_dataset = []
     correlated_tbls = []
     for d in model_args.input_dirs:
         input_files = glob.glob(f"{d}/data_page_query/data_*.feather")
@@ -112,25 +127,41 @@ def generate_automl_dataset(logger, model_args):
             stats.set_index(keys=["time"], inplace=True)
 
             data = pd.read_feather(input_file)
-            mapping = {
-                "IndexScan": OpType.SELECT.value,
-                "IndexOnlyScan": OpType.SELECT.value,
-                "ModifyTableInsert": OpType.INSERT.value,
-                "ModifyTableUpdate": OpType.UPDATE.value,
-                "ModifyTableDelete": OpType.DELETE.value
-            }
             # Eliminate everything else other than above.
-            data = data[data.comment.isin([k for k in mapping.keys()])]
+            data = data[data.comment.isin([k for k in SUPPORTED_OUS_MAPPING.keys()])]
+            data["optype"] = data.comment.apply(lambda x: str(int(SUPPORTED_OUS_MAPPING[x])))
 
-            data["optype"] = data.comment.apply(lambda x: str(int(mapping[x])))
-            data.set_index(keys=["start_timestamp"], inplace=True)
-            data.sort_index(inplace=True)
-            data = pd.merge_asof(data, stats, left_index=True, right_index=True, allow_exact_matches=True)
-            data.reset_index(drop=False, inplace=True)
+            dfs = []
+            for target, df in data.groupby(by=["target"]):
+                df["num_pages"] = df.table_len / 8192.0
+                df["tuple_count"] = df.tuple_count if "tuple_count" in df else df.approx_tuple_count
+                df["tuple_len_avg"] = (df.tuple_len / df.tuple_count) if "tuple_len" in df else (df.approx_tuple_len / df.approx_tuple_count)
+                if target == tbl:
+                    df["index_natts"] = 0
+                    df["index_key_size"] = 0
+                    df["index_tree_level"] = 0
+                    df["index_num_pages"] = 0
+                    df["index_leaf_pages"] = 0
+                else:
+                    # If we're dealing with an index, perform a series of augmentations.
+                    stats = pd.read_csv(f"{d}/{target}.csv")
+                    stats["num_pages"] = stats.index_size / 8192.0
+                    stats["time"] = stats.time / 1e6
+                    stats = stats[["time", "tree_level", "index_size", "leaf_pages"]]
 
-            data["norm_num_pages"] = data.table_len / 8192.0
-            data["norm_tuple_count"] = data.tuple_count if "tuple_count" in data else data.approx_tuple_count
-            data["norm_tuple_len_avg"] = (data.tuple_len / data.tuple_count) if "tuple_len" in data else (data.approx_tuple_len / data.approx_tuple_count)
+                    # Get the number of attributes and key size of the index.
+                    key_size, natts = identify_key_size(d, target)
+
+                    df.set_index(keys=["start_timestamp"], inplace=True)
+                    df.sort_index(inplace=True)
+                    df = pd.merge_asof(df, stats, left_index=True, right_index=True, allow_exact_matches=True)
+                    df.reset_index(drop=False, inplace=True)
+                    df.rename(columns={ "tree_level": "index_tree_level", "num_pages": "index_num_pages", "leaf_pages": "index_leaf_pages", }, inplace=True)
+                    df["index_key_natts"] = natts
+                    df["index_key_size"] = key_size
+
+                dfs.append(df)
+            data = pd.concat(dfs, ignore_index=True)
 
             if Path(f"{d}/data_page_query/keys/{tbl}.feather").exists():
                 keys = pd.read_feather(f"{d}/data_page_query/keys/{tbl}.feather")
@@ -151,64 +182,15 @@ def generate_automl_dataset(logger, model_args):
                             ff_value = float(value) / 100.0
 
             for wi, df in data.groupby(by=["window_bucket", "comment"]):
-                input_args, key_dists, masks = generate_point_input(model_args, df.iloc[0], df, tbl_attr_keys[tbl], ff_value)
-                global_catargs.append([wi[1]])
-                global_args.append(input_args)
-                global_dists.append(key_dists)
-                global_masks.append(masks)
+                input_row = generate_point_input(model_args, df.iloc[0], df, tbl_attr_keys[tbl], ff_value)
                 # FIXME(TARGET): Assume all tuples have equal probability of triggering the event.
-                global_targets.append((df.total_blks_requested / df.total_tuples_touched).mean())
+                input_row["asked_pages_per_tuple"] = (df.total_blks_requested / df.total_tuples_touched).mean()
+                input_row["ou_type"] = wi[1]
+
+                input_dataset.append(input_row)
                 correlated_tbls.append(tbl)
 
-    return global_args, global_catargs, global_dists, global_masks, global_targets, tbl_attr_keys, correlated_tbls
-
-
-class BufferPageModel():
-    def __getitem__(self, key):
-        return getattr(self, key)
-
-    def __setitem__(self, key, value):
-        setattr(self, key, value)
-
-    def __init__(self, model_args):
-        super(BufferPageModel, self).__init__()
-        self.args = model_args
-
-    def require_optimize():
-        return False
-
-    def load_model(model_file):
-        with open(f"{model_file}/args.pickle", "rb") as f:
-            args = pickle.load(f)
-
-        model = BufferPageModel(args)
-        model.automl = AutoML(results_path=f"{model_file}/perform")
-        return model
-
-    def fit(self, dataset):
-        x, y = dataset[0], dataset[1]
-
-        automl = AutoML(results_path=f"{self.args.output_path}/perform", ml_task="regression", eval_metric="mse", mode="Perform", total_time_limit=7200)
-        automl.fit(x, y)
-
-        with open(f"{self.args.output_path}/args.pickle", "wb") as f:
-            pickle.dump(self.args, f)
-
-    def get_dataset(logger, model_args):
-        sub_dirs = []
-        for d in model_args.input_dirs:
-            for ws in model_args.window_slices:
-                sub_dirs.append(Path(d) / f"data_page_{ws}/data.feather")
-
-        data = pd.concat(map(pd.read_feather, sub_dirs), ignore_index=True)
-        data["asked_pages"] = data.total_blks_requested / data.total_tuples_touched
-        x = data[["comment", "reltuples", "relpages"]]
-        y = data["asked_pages"]
-        return (x, y)
-
-    def inference(self, input_frame):
-        df = pd.DataFrame(input_frame)
-        return np.clip(self.automl.predict(df), 0, None)
+    return input_dataset, correlated_tbls
 
 
 class AutoMLBufferPageModel():
@@ -222,9 +204,6 @@ class AutoMLBufferPageModel():
         super(AutoMLBufferPageModel, self).__init__()
         self.model_args = model_args
 
-    def require_optimize():
-        return False
-
 
     def load_model(model_file):
         with open(f"{model_file}/args.pickle", "rb") as f:
@@ -237,45 +216,23 @@ class AutoMLBufferPageModel():
 
 
     def fit(self, dataset):
-        predictor = TabularPredictor(label=MODEL_WORKLOAD_TARGETS[0], problem_type="regression", eval_metric=MODEL_WORKLOAD_METRICS[0], path=self.model_args.output_path)
+        predictor = TabularPredictor(label=BUFFER_PAGE_TARGETS[0],
+                                     problem_type="regression",
+                                     eval_metric=BUFFER_PAGE_METRICS[0],
+                                     path=self.model_args.output_path)
+
         predictor.fit(dataset, time_limit=self.model_args.automl_timeout_secs, presets=self.model_args.automl_quality, num_cpus=self.model_args.num_threads)
         with open(f"{self.model_args.output_path}/args.pickle", "wb") as f:
             pickle.dump(self.model_args, f)
 
 
     def get_dataset(logger, model_args, inference=False):
-        global_args, global_catargs, global_dists, global_masks, global_targets, tbl_attr_keys, correlated_tbls = generate_automl_dataset(logger, model_args)
+        input_dataset, correlated_tbls, generate_dataset(logger, model_args)
+        input_dataset = [{k:item[k] for k in BUFFER_PAGE_INPUTS + BUFFER_PAGE_TARGETS} for item in input_dataset]
 
-        inputs = []
-        hist = model_args.hist_width
-        for i in range(len(global_args)):
-            input_row = {
-                "free_percent": global_args[i][0],
-                "dead_tuple_percent": global_args[i][1],
-                "norm_num_pages": global_args[i][2],
-                "norm_tuple_count": global_args[i][3],
-                "norm_tuple_len_avg": global_args[i][4],
-                "target_ff": global_args[i][5],
-                "ou_type": global_catargs[i][0],
-
-                "asked_pages_per_tuple": global_targets[i],
-            }
-
-            if inference:
-                input_row["table"] = correlated_tbls[i]
-
-            hist_ranges = [
-                ("data", 0, hist),
-                ("op", hist, 2 * hist),
-            ]
-
-            keys = tbl_attr_keys[correlated_tbls[i]]
-            for colidx, col in enumerate(keys):
-                if global_masks[i][colidx] == 1:
-                    for name, start, end in hist_ranges:
-                        for j in range(start, end):
-                            input_row[f"{correlated_tbls[i]}_{col}_{name}_{j % hist}"] = global_dists[i][colidx][j]
-            inputs.append(input_row)
+        if inference:
+            for i in range(len(input_dataset)):
+                input_dataset[i]["table"] = correlated_tbls[i]
 
         inputs = pd.DataFrame(inputs)
         inputs.fillna(value=0, inplace=True)
@@ -284,69 +241,62 @@ class AutoMLBufferPageModel():
         return inputs
 
 
-    def inference(self, table_state, table_attr_map, keyspace_feat_space, window, output_df=None):
-        tbl_ous = {
-            "warehouse": ["ModifyTableUpdate", "IndexScan"],
-            "district": ["ModifyTableUpdate", "IndexScan"],
-            "new_order": ["ModifyTableUpdate", "ModifyTableInsert", "IndexOnlyScan", "IndexScan"],
-            "order_line": ["IndexScan", "ModifyTableInsert", "ModifyTableUpdate"],
-            "oorder": ["IndexScan", "ModifyTableInsert", "ModifyTableUpdate"],
-            "history": ["ModifyTableInsert"],
-            "stock": ["IndexScan", "ModifyTableUpdate"],
-            "customer": ["IndexScan", "ModifyTableUpdate"],
-            "item": ["IndexScan"],
-        }
-
+    def inference(self, ougc, window, output_col="req_pages"):
+        tbls = [t for t in ougc.tables]
+        keyspace_feat_map = ougc.table_keyspace_features
         inputs = []
-        hist = self.model_args.hist_width
-        for tbl, state in table_state.items():
-            for ou_type in tbl_ous[tbl]:
-                mapping = {
-                    "IndexScan": OpType.SELECT.value,
-                    "IndexOnlyScan": OpType.SELECT.value,
-                    "ModifyTableInsert": OpType.INSERT.value,
-                    "ModifyTableUpdate": OpType.UPDATE.value,
-                    "ModifyTableDelete": OpType.DELETE.value
-                }
+        for tbl in tbls:
+            # Get all indexes. 0 is the sentinel.
+            idxoids = [0]
+            if tbl in ougc.table_indexoid_map:
+                idxoids.extend(table_indexoid_map[tbl])
 
-                df = None
-                if tbl in keyspace_feat_space:
-                    df = keyspace_feat_space[tbl]
-                    df = df[df.window_index == window]
-                    df = df[df.index_clause.isna()]
-                    df = df[(df.optype == "data") | (df.optype == str(mapping[ou_type]))]
+            for idxoid in idxoids:
+                for ou_type in SUPPORTED_OUS_MAPPING.keys():
+                    if idxoid == 0:
+                        # FIXME(BITMAP): Handle bitmap.
+                        if ou_type not in [OperatingUnit.IndexScan.name, OperatingUnit.IndexOnlyScan.name]:
+                            continue
 
-                input_args, key_dists, masks = generate_point_input(self.model_args, Map(table_state[tbl]), df, table_attr_map[tbl], 1.0)
+                    info_tuple = copy(table_state[tbl])
+                    target_ff = 1.0
+                    indexoid = None
+                    df = None
+                    if idxoid == 0:
+                        if tbl in keyspace_feat_space:
+                            df = keyspace_feat_space[tbl]
+                            df = df[df.window_index == window]
+                            df = df[df.index_clause.isna()]
+                            df = df[(df.optype == "data") | (df.optype == str(SUPPORTED_OUS_MAPPING[ou_type]))]
+                        attkeys = ougc.table_attr_map[tbl]
+                        target_ff = ougc.table_feature_state[tbl]["target_ff"]
+                    else:
+                        indexoid = idxoid
+                        assert idxoid in ougc.index_feature_state
+                        idxstate = ougc.index_feature_state[idxoid]
+                        indexname = idxstate["indexname"]
 
-                input_row = {
-                    "free_percent": input_args[0],
-                    "dead_tuple_percent": input_args[1],
-                    "norm_num_pages": input_args[2],
-                    "norm_tuple_count": input_args[3],
-                    "norm_tuple_len_avg": input_args[4],
-                    "target_ff": input_args[5],
-                    "ou_type": ou_type,
-                    "table": tbl,
-                }
+                        if tbl in keyspace_feat_space:
+                            df = keyspace_feat_space[tbl]
+                            df = df[df.window_index == window]
+                            df = df[(df.index_clause == indexname) | (keys.optype == "data") | (keys.optype != f"{OpType.SELECT.value}")]
 
-                hist_ranges = [
-                    ("data", 0, hist),
-                    ("op", hist, 2 * hist),
-                ]
+                        info_tuple["index_tree_level"] = idxstate["tree_level"]
+                        info_tuple["index_num_pages"] = idxstate["num_pages"]
+                        info_tuple["index_leaf_pages"] = idxstate["leaf_pages"]
+                        info_tuple["index_key_size"] = idxstate["key_size"]
+                        info_tuple["index_key_natts"] = idxstate["key_natts"]
+                        attkeys = ougc.table_attr_map[indexname]
 
-                keys = table_attr_map[tbl]
-                for colidx, col in enumerate(keys):
-                    if masks[colidx] == 1:
-                        for name, start, end in hist_ranges:
-                            for j in range(start, end):
-                                input_row[f"{tbl}_{col}_{name}_{j % hist}"] = key_dists[colidx][j]
-                inputs.append(input_row)
+                    input_row = generate_point_input(self.model_args, Map(info_tuple), df, table_attr_map[tbl], target_ff)
+                    input_row["table"] = tbl
+                    input_row["indexname"] = indexname
+                    input_row["ou_type"] = ou_type
+                    inputs.append(input_row)
 
         inputs = pd.DataFrame(inputs)
         inputs.fillna(value=0, inplace=True)
-
         predictions = np.clip(self.predictor.predict(inputs), 0, None)
-
         inputs["window"] = window
-        inputs["pred_asked_pages_per_tuple"] = predictions
+        inputs[output_col] = predictions
         return inputs

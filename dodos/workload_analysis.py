@@ -90,7 +90,7 @@ def task_workload_exec_feature_synthesis():
     """
     Workload Analysis: collect the input feature data for training exec feature model.
     """
-    def workload_exec_feature_synthesis(input_workload, workload_only, psycopg2_conn, work_prefix, buckets, steps, slice_window, offcpu_logwidth, gen_exec_features, gen_data_page_features, gen_concurrency_features, generate_vacuum_flag):
+    def workload_exec_feature_synthesis(input_workload, workload_only, psycopg2_conn, work_prefix, buckets, slice_window, offcpu_logwidth, gen_exec_features, gen_data_page_features, generate_vacuum_flag):
         assert input_workload is not None
         assert work_prefix is not None
 
@@ -102,7 +102,6 @@ def task_workload_exec_feature_synthesis():
             f"--workload-only {workload_only} "
             f"--work-prefix {work_prefix} "
             f"--buckets {buckets} "
-            f"--steps {steps} "
             f"--slice-window {slice_window} "
             f"--offcpu-logwidth {offcpu_logwidth} "
         )
@@ -111,8 +110,6 @@ def task_workload_exec_feature_synthesis():
             eval_args += "--gen-exec-features "
         if gen_data_page_features is not None:
             eval_args += "--gen-data-page-features "
-        if gen_concurrency_features is not None:
-            eval_args += "--gen-concurrency-features "
         if generate_vacuum_flag is not None:
             eval_args += "--generate-vacuum-flag "
 
@@ -131,12 +128,10 @@ def task_workload_exec_feature_synthesis():
             { "name": "psycopg2_conn", "long": "psycopg2_conn", "help": "psycopg2 connection string to connect to the valid database instance.", "default": None, },
             { "name": "work_prefix", "long": "work_prefix", "help": "Prefix to use for working with the database.", "default": None, },
             { "name": "buckets", "long": "buckets", "help": "Number of buckets to use for bucketizing input data.", "default": 10, },
-            { "name": "steps", "long": "steps", "help": "Summarization steps for concurrency histograms.", "default": "1", },
             { "name": "slice_window", "long": "slice_window", "help": "Slice window to use.", "default": "1000", },
             { "name": "offcpu_logwidth", "long": "offcpu_logwidth", "help": "Off CPU Log-width time (# buckets in histogram).", "default": 31, },
             { "name": "gen_exec_features", "long": "gen_exec_features", "help": "Whether to generate exec features data.", "default": None, },
             { "name": "gen_data_page_features", "long": "gen_data_page_features", "help": "Whether to generate data page features.", "default": None, },
-            { "name": "gen_concurrency_features", "long": "gen_concurrency_features", "help": "Whether to generate concurrency features.", "default": None, },
             { "name": "generate_vacuum_flag", "long": "generate_vacuum_flag", "help": "Whether to generate the vacuum flag instead of dropping the window.", "default": None, },
         ],
     }
@@ -149,12 +144,9 @@ def task_workload_build_exec_model():
     def workload_build_exec_model(
             model_name, input_dirs, output_dir,
             automl_timeout_secs, automl_quality,
-            automl_forecast_horizon,
-            automl_splitter_offset,
-            lr, epochs, batch_size, cuda, train_size, hidden,
-            depth, sweep_dropout, add_nonnorm_features, num_iterations,
-            num_cpus, max_threads, hist_width, patience, ckpt_interval,
-            steps, window_slices):
+            automl_consider_correlation,
+            keep_identity,
+            num_cpus, max_threads, hist_width, window_slices):
         assert model_name is not None
         assert input_dirs is not None
         assert output_dir is not None
@@ -166,37 +158,18 @@ def task_workload_build_exec_model():
             f"--model-name {model_name} "
             f"--automl-timeout-secs {automl_timeout_secs} "
             f"--automl-quality {automl_quality} "
-            f"--automl-forecast-horizon {automl_forecast_horizon} "
-            f"--automl-splitter-offset {automl_splitter_offset} "
-            f"--train-size {train_size} "
             f"--input-dirs {input_dirs} "
             f"--output-dir {output_dir} "
-            f"--num-iterations {num_iterations} "
             f"--num-cpus {num_cpus} "
             f"--max-threads {max_threads} "
             f"--hist-width {hist_width} "
-            f"--patience {patience} "
-            f"--ckpt-interval {ckpt_interval} "
-            f"--steps {steps} "
             f"--window-slices {window_slices} "
         )
 
-        if lr:
-            eval_args += f"--lr {lr} "
-        if epochs:
-            eval_args += f"--epochs {epochs} "
-        if batch_size:
-            eval_args += f"--batch-size {batch_size} "
-        if hidden:
-            eval_args += f"--hidden {hidden} "
-        if depth:
-            eval_args += f"--depth {depth} "
-        if cuda:
-            eval_args += "--cuda "
-        if sweep_dropout:
-            eval_args += "--sweep-dropout "
-        if add_nonnorm_features:
-            eval_args += "--add-nonnorm-features "
+        if keep_identity is not None:
+            eval_args += "--keep-identity "
+        if automl_consider_correlation is not None:
+            eval_args += "--automl-consider-correlation "
 
         return f"python3 -m behavior workload_build_exec_model {eval_args}"
 
@@ -210,24 +183,11 @@ def task_workload_build_exec_model():
             { "name": "output_dir", "long": "output_dir", "help": "Path to the containing output model directory.", "default": None, },
             { "name": "automl_timeout_secs", "long": "automl_timeout_secs", "help": "AutoML timeout in seconds.", "default": 3600, },
             { "name": "automl_quality", "long": "automl_quality", "help": "AutoML Quality.", "default": None, },
-            { "name": "automl_forecast_horizon", "long": "automl_forecast_horizon", "help": "AutomL Forecast horizon", "default": 1, },
-            { "name": "automl_splitter_offset", "long": "automl_splitter_offset", "help": "AutomL Splitter Extra Padding", "default": 0, },
-            { "name": "lr", "long": "lr", "help": "Learning rate to use for training.", "default": None, },
-            { "name": "epochs", "long": "epochs", "help": "Epochs to use for training.", "default": None, },
-            { "name": "batch_size", "long": "batch_size", "help": "Batch size to use for training.", "default": None, },
-            { "name": "cuda", "long": "cuda", "help": "Whether to use CUDA or not.", "default": False, },
-            { "name": "train_size", "long": "train_size", "help": "Percentage of data to use for training.", "default": 0.8, },
-            { "name": "hidden", "long": "hidden", "help": "Number of hidden to units to use across the model.", "default": None, },
-            { "name": "depth", "long": "depth", "help": "Depth to use in the model.", "default": None, },
-            { "name": "sweep_dropout", "long": "sweep_dropout", "help": "Whether to sweep dropout.", "default": False, },
-            { "name": "add_nonnorm_features", "long": "add_nonnorm_features", "help": "Whether to add non normalization features>", "default": False, },
-            { "name": "num_iterations", "long": "num_iterations", "help": "Number of iterations.", "default": 1, },
+            { "name": "automl_consider_correlation", "long": "automl_consider_correlation", "help": "Allow AutoML to consider multi label correlation.", "default": None, },
+            { "name": "keep_identity", "long": "keep_identity", "help": "Whether to keep the column/table identifier.", "default": None, },
             { "name": "num_cpus", "long": "num_cpus", "help": "Number of CPUs.", "default": mp.cpu_count(), },
             { "name": "max_threads", "long": "max_threads", "help": "Maximum number of threads.", "default": mp.cpu_count(), },
             { "name": "hist_width", "long": "hist_width", "help": "Width of the histogram.", "default": 10, },
-            { "name": "patience", "long": "patience", "help": "Patience for early stopping.", "default": 400, },
-            { "name": "ckpt_interval", "long": "ckpt_interval", "help": "Interval for checkpointing.", "default": 100, },
-            { "name": "steps", "long": "steps", "help": "Steps for concurrency.", "default": "1", },
             { "name": "window_slices", "long": "window_slices", "help": "Window slices for buffer pool model.", "default": "1000", },
         ],
     }

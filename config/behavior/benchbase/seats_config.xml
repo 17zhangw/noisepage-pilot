@@ -19,6 +19,7 @@
         <work>
             <time>60</time>
             <rate>10000</rate>
+            <warmup>0</warmup>
             <weights>10, 10, 35, 20, 10, 15</weights>
         </work>
     </works>

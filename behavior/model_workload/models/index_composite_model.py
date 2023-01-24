@@ -30,14 +30,21 @@ from behavior.model_workload.models.utils import generate_dataset_index
 
 
 INDEX_STATE_TARGETS = [
+    ("extend_percent", None, 0),
+    ("split_percent", None, 0),
     ("next_tree_level", "tree_level", 0),
     ("next_num_pages", "num_pages", 0),
     ("next_leaf_pages", "leaf_pages", 0),
+    ("next_empty_pages", "empty_pages", 0),
     ("next_deleted_pages", "deleted_pages", 0),
     ("next_avg_leaf_density", "avg_leaf_density", 1),
 ]
 
 INDEX_STATE_METRICS = [
+    "mean_absolute_error",
+    "mean_absolute_error",
+
+    "mean_squared_error",
     "mean_squared_error",
     "mean_squared_error",
     "mean_squared_error",
@@ -80,7 +87,7 @@ INDEX_STATE_INPUTS = [
 ]
 
 
-class AutoMLIndexStateModel():
+class AutoMLIndexCompositeModel():
     def __getitem__(self, key):
         return getattr(self, key)
 
@@ -88,7 +95,7 @@ class AutoMLIndexStateModel():
         setattr(self, key, value)
 
     def __init__(self, model_args):
-        super(AutoMLIndexStateModel, self).__init__()
+        super(AutoMLIndexCompositeModel, self).__init__()
         self.model_args = model_args
 
 
@@ -108,6 +115,9 @@ class AutoMLIndexStateModel():
                 continue
 
             for target, src, _ in INDEX_STATE_TARGETS:
+                if src is None:
+                    continue
+
                 input_row[target] = input_dataset[i+1][src]
 
             if inference:
@@ -144,10 +154,10 @@ class AutoMLIndexStateModel():
             pickle.dump(self.model_args, f)
 
 
-    def inference(self, table_state, table_attr_map, keyspace_feat_space, window):
+    def inference(self, ougc, window, output_df=False):
         def infer(inputs):
             predictions = self.predictor.predict(inputs)
-            for target, _, clip in INDEX_STATE_TARGETS:
+            for target, _, clip in COMPOSITE_TARGETS:
                 if clip == 1:
                     predictions[target] = np.clip(predictions[target], 0, 1)
             return predictions
@@ -155,9 +165,9 @@ class AutoMLIndexStateModel():
         idx_keys, predictions, ret_df = generate_inference_index(self.model_args, infer, ougc, window, output_df=output_df)
 
         # Coerce the output predictions based on TABLE_FEATURE_TARGETS.
-        outputs = np.zeros((len(idx_keys), len(INDEX_STATE_TARGETS)))
+        outputs = np.zeros((len(idx_keys), len(COMPOSITE_TARGETS)))
         for i, _ in enumerate(idx_keys):
-            for j, (key, _, _) in enumerate(INDEX_STATE_TARGETS):
+            for j, (key, _, _) in enumerate(COMPOSITE_TARGETS):
                 outputs[i][j] = predictions[key].iloc[i]
 
         return idx_keys, outputs, ret_df

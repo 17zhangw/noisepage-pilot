@@ -194,7 +194,7 @@ def task_behavior_train():
     Behavior modeling: train OU models.
     """
 
-    def train_cmd(config_file, train_data, prefix_allow_derived_features, robust, log_transform, separate_indkey_features, trace_inputs, force_nonincremental, output_subpath):
+    def train_cmd(config_file, train_data, prefix_allow_derived_features, robust, log_transform, separate_indkey_features, trace_inputs, output_subpath):
         train_args = (
             f"--config-file {config_file} "
             f"--dir-data {train_data} "
@@ -204,9 +204,6 @@ def task_behavior_train():
             train_args += f"--dir-output {ARTIFACT_MODELS} "
         else:
             train_args += f"--dir-output {ARTIFACT_MODELS}/{output_subpath} "
-
-        if force_nonincremental is not None:
-            train_args = train_args + "--force-nonincremental "
 
         if robust is not None:
             train_args = train_args + "--robust "
@@ -238,7 +235,6 @@ def task_behavior_train():
             { "name": "log_transform", "long": "log_transform", "help": "Whether to use the log_transform to the data.", "default": None, },
             { "name": "separate_indkey_features", "long": "separate_indkey_features", "help": "Whether to separate each indkey feature.", "default": None, },
             { "name": "trace_inputs", "long": "trace_inputs", "help": "Whether to trace transformed inputs to the model", "default": None, },
-            { "name": "force_nonincremental", "long": "force_nonincremental", "help": "Whether to force nonincremental training.", "default": None, },
             { "name": "output_subpath", "long": "output_subpath", "help": "Subpath in the output directory.", "default": None, },
         ],
     }
@@ -324,13 +320,15 @@ def task_behavior_eval_query_workload():
     """
     def eval_cmd(num_cpus, num_threads, session_sql, input_dir, output_dir, ou_models,
                  query_feature_granularity_queries,
+                 time_slice_interval,
                  table_feature_model_cls, table_feature_model_path,
+                 table_state_model_cls, table_state_model_path,
                  buffer_page_model_cls, buffer_page_model_path,
-                 buffer_access_model_cls, buffer_access_model_path,
-                 concurrency_model_cls, concurrency_model_path,
-                 concurrency_mpi, workload_analysis_conn,
+                 index_feature_model_cls, index_feature_model_path,
+                 index_state_model_cls, index_state_model_path,
+                 workload_analysis_conn,
                  target_db_conn, workload_analysis_prefix, histogram_width, forward_state,
-                 use_plan_estimates):
+                 use_plan_estimates, estimate_vacuum, use_vacuum_flag):
         eval_args = (
             f"--num-cpus {num_cpus} "
             f"--num-threads {num_threads} "
@@ -339,15 +337,17 @@ def task_behavior_eval_query_workload():
             f"--output-dir {output_dir} "
             f"--ou-models {ou_models} "
             f"--query-feature-granularity-queries {query_feature_granularity_queries} "
+            f"--time-slice-interval {time_slice_interval} "
             f"--table-feature-model-cls {table_feature_model_cls} "
             f"--table-feature-model-path {table_feature_model_path} "
+            f"--table-state-model-cls {table_state_model_cls} "
+            f"--table-state-model-path {table_state_model_path} "
             f"--buffer-page-model-cls {buffer_page_model_cls} "
             f"--buffer-page-model-path {buffer_page_model_path} "
-            f"--buffer-access-model-cls {buffer_access_model_cls} "
-            f"--buffer-access-model-path {buffer_access_model_path} "
-            f"--concurrency-model-cls {concurrency_model_cls} "
-            f"--concurrency-model-path {concurrency_model_path} "
-            f"--concurrency-mpi {concurrency_mpi} "
+            f"--index-feature-model-cls {index_feature_model_cls} "
+            f"--index-feature-model-path {index_feature_model_path} "
+            f"--index-state-model-cls {index_state_model_cls} "
+            f"--index-feature-model-cls {index_feature_model_cls} "
             f"--workload-analysis-conn \"{workload_analysis_conn}\" "
             f"--target-db-conn \"{target_db_conn}\" "
             f"--workload-analysis-prefix {workload_analysis_prefix} "
@@ -356,9 +356,12 @@ def task_behavior_eval_query_workload():
 
         if forward_state is not None:
             eval_args += f"--forward-state "
-
         if use_plan_estimates is not None:
             eval_args += f"--use-plan-estimates "
+        if estimate_vacuum is not None:
+            eval_args += f"--estimate-vacuum "
+        if use_vacuum_flag is not None:
+            eval_Args += f"--use-vacuum-flag "
 
         return f"python3 -m behavior eval_query_workload {eval_args}"
 
@@ -375,21 +378,25 @@ def task_behavior_eval_query_workload():
             { "name": "output_dir", "long": "output_dir", "help": "Output directory for evals.", "default": None, },
             { "name": "ou_models", "long": "ou_models", "help": "Path to OU models.", "default": None, },
             { "name": "query_feature_granularity_queries", "help": "Granularity of window slices in queries.", "default": 1000, },
-            { "name": "table_feature_model_cls", "long": "table_feature_model_cls", "help": "Table Feature model to instantiate", "default": "TableFeatureModel", },
+            { "name": "time_slice_interval", "help": "Zero to disable otherwise slice queries by time.", "default": 0, },
+            { "name": "table_feature_model_cls", "long": "table_feature_model_cls", "help": "Table Feature model to instantiate", "default": "AutoMLTableFeatureModel", },
             { "name": "table_feature_model_path", "long": "table_feature_model_path", "help": "Path to Table Feature models.", "default": None, },
-            { "name": "buffer_page_model_cls", "long": "buffer_page_model_cls", "help": "Buffer Page model to instantiate.", "default": "BufferPageModel", },
+            { "name": "table_state_model_cls", "long": "table_state_model_cls", "help": "Table State model to instantiate", "default": "AutoMLTableStateModel", },
+            { "name": "table_state_model_path", "long": "table_state_model_path", "help": "Path to Table State models.", "default": None, },
+            { "name": "buffer_page_model_cls", "long": "buffer_page_model_cls", "help": "Buffer Page model to instantiate.", "default": "AutoMLBufferPageModel", },
             { "name": "buffer_page_model_path", "long": "buffer_page_model_path", "help": "Path to Buffer Page models.", "default": None, },
-            { "name": "buffer_access_model_cls", "long": "buffer_acccess_model_cls", "help": "Buffer Access model to instantiate.", "default": "BufferAccessModel", },
-            { "name": "buffer_access_model_path", "long": "buffer_acccess_model_path", "help": "Path to Buffer Access models.", "default": None, },
-            { "name": "concurrency_model_cls", "long": "concurrency_model_cls", "help": "Concurrency Model to instantiate.", "default": "ConcurrencyModel", },
-            { "name": "concurrency_model_path", "long": "concurrency_model_path", "help": "Path to Concurrency models.", "default": None, },
-            { "name": "concurrency_mpi", "long": "concurrency_mpi", "help": "Concurrency MPI.", "default": None, },
+            { "name": "index_feature_model_cls", "help": "Index Feature Model to instantiate", "default": "AutoMLIndexFeatureModel", },
+            { "name": "index_feature_model_path", "help": "Path to index feature model", "default": None, },
+            { "name": "index_state_model_cls", "help": "Index State Model to instantiate", "default": "AutoMLIndexStateModel", },
+            { "name": "index_state_model_path", "help": "Path to index state model", "default": None, },
             { "name": "workload_analysis_conn", "long": "workload_analysis_conn", "help": "psycopg2 connection string to connect to the workload database instance.", "default": None, },
             { "name": "target_db_conn", "long": "target_db_conn", "help": "psycopg2 connection string to connect to the target database instance.", "default": None, },
             { "name": "workload_analysis_prefix", "long": "workload_analysis_prefix", "help": "Workload analysis prefix to use.", "default": None, },
             { "name": "histogram_width", "long": "histogram_width", "help": "Number of buckets (histogram width).", "default": None, },
             { "name": "forward_state", "long": "forward_state", "help": "Whether to forward initial state or not.", "default": False, },
             { "name": "use_plan_estimates", "long": "use_plan_estimates", "help": "Whether to use postgres plan estimates as opposed to row execution features.", "default": False, },
+            { "name": "estimate_vacuum", "long": "estimate_vacuum", "help": "WHether to perform analytical vacuum estimation or not.", "default": False, },
+            { "name": "use_vacuum_flag", "long": "use_vacuum_flag", "help": "Whether to use vacuum flag with table state model.", "default": False, },
         ],
     }
 
