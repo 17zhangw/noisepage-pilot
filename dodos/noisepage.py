@@ -200,9 +200,9 @@ def task_noisepage_swap_config():
     }
 
 
-def task_noisepage_qss_install():
+def task_noisepage_install_extensions():
     """
-    NoisePage: install qss extension to enable query state collection.
+    NoisePage: install all relevant extensions
     """
     sql_list1 = [
         "ALTER SYSTEM SET allow_system_table_mods = ON",
@@ -217,10 +217,14 @@ def task_noisepage_qss_install():
             command text
             )
             WITH (autovacuum_enabled = OFF)""",
-        "ALTER SYSTEM SET shared_preload_libraries='qss','pgstattuple'",
+        "ALTER SYSTEM SET shared_preload_libraries='qss','warmer','phantom','pgstattuple'",
         "DROP EXTENSION IF EXISTS qss",
+        "DROP EXTENSION IF EXISTS phantom",
+        "DROP EXTENSION IF EXISTS warmer",
         "DROP EXTENSION IF EXISTS pgstattuple",
         "CREATE EXTENSION qss",
+        "CREATE EXTENSION phantom",
+        "CREATE EXTENSION warmer",
         "CREATE EXTENSION pgstattuple",
     ]
 
@@ -238,6 +242,8 @@ def task_noisepage_qss_install():
             lambda: os.chdir(BUILD_PATH),
             # Compile and install qss.
             "doit qss_install",
+            "doit warmer_install",
+            "doit phantom_install",
             # Alter system table to allow modification.
             lambda: os.chdir(ARTIFACTS_PATH),
             run_query_in_db,
@@ -251,83 +257,8 @@ def task_noisepage_qss_install():
             {
                 "name": "dbname",
                 "long": "dbname",
-                "help": "The database name where to install qss.",
+                "help": "The database name where to install extensions.",
                 "default": DEFAULT_DB,
-            },
-        ],
-    }
-
-
-def task_noisepage_enable_logging():
-    """
-    NoisePage: enable logging. (will cause a restart)
-    """
-    sql_list = [
-        "ALTER SYSTEM SET log_destination='csvlog'",
-        "ALTER SYSTEM SET log_statement='all'",
-        "ALTER SYSTEM SET logging_collector=on",
-    ]
-
-    return {
-        "actions": [
-            lambda: os.chdir(ARTIFACTS_PATH),
-            *[
-                f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={DEFAULT_DB} --username={DEFAULT_USER} --command="{sql}"'
-                for sql in sql_list
-            ],
-            lambda: local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA, "-m", "smart"].run_fg(),
-            # Reset working directory.
-            lambda: os.chdir(doit.get_initial_workdir()),
-        ],
-        "verbosity": VERBOSITY_DEFAULT,
-    }
-
-
-def task_noisepage_disable_logging():
-    """
-    NoisePage: disable logging. (will cause a restart)
-    """
-    sql_list = [
-        "ALTER SYSTEM SET log_destination='stderr'",
-        "ALTER SYSTEM SET log_statement='none'",
-        "ALTER SYSTEM SET logging_collector=off",
-    ]
-
-    return {
-        "actions": [
-            lambda: os.chdir(ARTIFACTS_PATH),
-            *[
-                f'PGPASSWORD={DEFAULT_PASS} ./psql --dbname={DEFAULT_DB} --username={DEFAULT_USER} --command="{sql}"'
-                for sql in sql_list
-            ],
-            lambda: local["./pg_ctl"]["restart", "-D", DEFAULT_PGDATA, "-m", "smart"].run_fg(),
-            # Reset working directory.
-            lambda: os.chdir(doit.get_initial_workdir()),
-        ],
-        "verbosity": VERBOSITY_DEFAULT,
-    }
-
-
-def task_noisepage_truncate_log():
-    """
-    NoisePage: truncate the most recent query log files.
-    """
-
-    return {
-        "actions": [
-            lambda: os.chdir(ARTIFACT_pgdata_log),
-            'RECENT=$(ls --sort=time --reverse *.csv | head --lines=%(num_files)s) ; echo "Deleting:\n$RECENT" ; rm $RECENT ; echo "Deleted."',
-            # Reset working directory.
-            lambda: os.chdir(doit.get_initial_workdir()),
-        ],
-        "verbosity": VERBOSITY_DEFAULT,
-        "uptodate": [False],
-        "params": [
-            {
-                "name": "num_files",
-                "long": "num_files",
-                "help": "The number of query log files to remove.",
-                "default": 5,
             },
         ],
     }

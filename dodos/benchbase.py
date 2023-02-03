@@ -133,24 +133,6 @@ def task_benchbase_bootstrap_dbms():
     }
 
 
-def task_benchbase_prewarm_install():
-    """
-    BenchBase: install pg_prewarm for BenchBase benchmarks.
-    """
-    sql_list = ["CREATE EXTENSION IF NOT EXISTS pg_prewarm"]
-
-    return {
-        "actions": [
-            *[f'{dodos.noisepage.ARTIFACT_psql} --dbname={DEFAULT_DB} --command="{sql}"' for sql in sql_list],
-        ],
-        "file_dep": [
-            dodos.noisepage.ARTIFACT_psql,
-        ],
-        "verbosity": VERBOSITY_DEFAULT,
-        "uptodate": [False],
-    }
-
-
 def task_benchbase_run():
     """
     BenchBase: run a specific benchmark.
@@ -285,9 +267,9 @@ def task_benchbase_snapshot_benchmark():
     }
 
 
-def task_benchbase_pg_prewarm_benchmark():
+def task_benchbase_warm_benchmark():
     """
-    Behavior modeling: Run pg_prewarm() on all the tables in the given benchmark.
+    Behavior modeling: Run warmer_prewarm() on all the tables in the given benchmark.
     This warms the buffer pool and OS page cache.
 
     Parameters
@@ -302,7 +284,7 @@ def task_benchbase_pg_prewarm_benchmark():
             return False
 
         for table in BENCHDB_TO_TABLES[benchmark]:
-            query = f"SELECT * FROM pg_prewarm('{table}');"
+            query = f"SELECT * FROM warmer_prewarm('{table}');"
             local[str(ARTIFACT_psql)]["--dbname=benchbase"]["--command"][query]()
 
     return {

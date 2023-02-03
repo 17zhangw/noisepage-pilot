@@ -55,7 +55,7 @@ PG_COLLECTOR_TARGETS = {
 }
 
 
-def pg_collector(output_rows, output_columns, slow_time, shutdown):
+def pg_collector(benchmark, output_rows, output_columns, slow_time, shutdown):
     def scrape_settings(connection, rows):
         result = []
         with connection.cursor(row_factory=dict_row) as cursor:
@@ -104,6 +104,12 @@ def pg_collector(output_rows, output_columns, slow_time, shutdown):
             pid = [r for r in cursor.execute("SELECT pg_backend_pid()")][0][0]
             collector_pids.append(pid)
 
+        # Start the phantom.
+        query = """
+            SELECT phantom_start_worker(ARRAY[{tbls}], {delta})
+        """.format(tbls=",".join([f"'{t}'" for t in BENCHDB_TO_TABLES[benchmark]]), delta=slow_time)
+        connection.execute(query, prepare=False)
+
         # Poll on the Collector's output buffer until Collector is shut down.
         while not shutdown.is_set():
             try:
@@ -129,6 +135,12 @@ def pg_collector(output_rows, output_columns, slow_time, shutdown):
             except Exception as e:  # pylint: disable=broad-except
                 # TODO(Matt): If postgres shuts down the connection closes and we get an exception for that.
                 logger.warning("Userspace Collector caught %s.", e)
+
+        # Make sure that we stall until the phantom worker has shutdown.
+        exist = True
+        connection.execute("SELECT phantom_stop_worker()", prepare=False)
+        while exist:
+            exist = bool([r for r in connection.execute("SELECT phantom_worker_exists()", prepare=False)][0][0])
 
     logger.info("Userspace Collector shut down.")
 
@@ -246,11 +258,11 @@ def main(benchmark, outdir, collector_interval, pid, bpf_trace):
     keep_running = True
 
     # Augment with pgstattuple_approx data.
-    tables = BENCHDB_TO_TABLES[benchmark]
-    for tbl in tables:
-        PG_COLLECTOR_TARGETS[tbl] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstattuple('{tbl}');"
-    for idx in BENCHDB_TO_INDEX[benchmark]:
-        PG_COLLECTOR_TARGETS[idx] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstatindex('{idx}');"
+    #tables = BENCHDB_TO_TABLES[benchmark]
+    #for tbl in tables:
+    #    PG_COLLECTOR_TARGETS[tbl] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstattuple('{tbl}');"
+    #for idx in BENCHDB_TO_INDEX[benchmark]:
+    #    PG_COLLECTOR_TARGETS[idx] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstatindex('{idx}');"
 
     # Monitor the postgres PID.
     setproctitle.setproctitle("Main Collector Process")
@@ -276,6 +288,7 @@ def main(benchmark, outdir, collector_interval, pid, bpf_trace):
         pg_collector_process = mp.Process(
             target=pg_collector,
             args=(
+                benchmark,
                 pg_scrape_tuples,
                 pg_scrape_columns,
                 collector_interval,

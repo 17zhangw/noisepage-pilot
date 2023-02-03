@@ -224,7 +224,7 @@ for workload in "${workload_directory}"/*; do
                 ${pg_ctl} start -D "${PGDATA_LOCATION}"
 
                 # Install QSS extension
-                doit noisepage_qss_install --dbname=benchbase
+                doit noisepage_install_extensions --dbname=benchbase
 
                 # shellcheck disable=2154 # populated by niet
                 if [ "$pg_analyze" != 'False' ];
@@ -237,8 +237,7 @@ for workload in "${workload_directory}"/*; do
                 if [ "$pg_prewarm" != 'False' ];
                 then
                     # If pg_prewarm is specified, then invoke pg_prewarm on the benchmark's tables.
-                    doit benchbase_prewarm_install
-                    doit benchbase_pg_prewarm_benchmark --benchmark="${benchmark}"
+                    doit benchbase_warm_benchmark --benchmark="${benchmark}"
                 fi
             elif [ "${continuous}" != 'True' ];
             then
@@ -257,8 +256,7 @@ for workload in "${workload_directory}"/*; do
                 if [ "$pg_prewarm" != 'False' ];
                 then
                     # If pg_prewarm is specified, then invoke pg_prewarm on the benchmark's tables.
-                    doit benchbase_prewarm_install
-                    doit benchbase_pg_prewarm_benchmark --benchmark="${benchmark}"
+                    doit benchbase_warm_benchmark --benchmark="${benchmark}"
                 fi
             fi
 
@@ -300,7 +298,9 @@ for workload in "${workload_directory}"/*; do
 
             # Move the relevant stats out to the benchmark output.
             mkdir "${benchmark_output}/stats.${i}"
-            mv ${PGDATA_LOCATION}/pg_stat/*.csv "${benchmark_output}/stats.${i}/"
+            mkdir "${benchmark_output}/phantom.${i}"
+            mv ${PGDATA_LOCATION}/pg_stat/*.csv "${benchmark_output}/phantom.${i}/"
+            mv ${benchmark_output}/phantom.${i}/pg_qss_*.csv "${benchmark_output}/stats.${i}/"
 
             if [ ! -z "$post_execute" ];
             then
