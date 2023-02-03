@@ -1,6 +1,6 @@
 # Modeling Configuration
 modeling:
-  methods: [gbm_l2]
+  methods: [gbm_l2, gbm_quantile_50]
   normalize: False
   log_transform: False
   robust: False

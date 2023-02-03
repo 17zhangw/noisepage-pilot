@@ -46,12 +46,14 @@ def lost_something(num_lost):
 
 # Name of output file/target --> (query, frequent)
 PG_COLLECTOR_TARGETS = {
-    "pg_stats": "SELECT EXTRACT(epoch from NOW())*1000000 as time, s.*, c.data_type FROM pg_stats s JOIN information_schema.columns c ON s.tablename=c.table_name AND s.attname=c.column_name WHERE schemaname = 'public';",
+    #"pg_stats": "SELECT EXTRACT(epoch from NOW())*1000000 as time, s.*, c.data_type FROM pg_stats s JOIN information_schema.columns c ON s.tablename=c.table_name AND s.attname=c.column_name WHERE schemaname = 'public';",
     "pg_class": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public';",
-    "pg_index": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_index;",
-    "pg_attribute": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_attribute;",
-    "pg_stat_user_tables": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_user_tables;",
-    "pg_trigger": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_trigger t, pg_constraint c WHERE t.tgconstraint = c.oid;",
+    "pg_stat_wal": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_wal;",
+    "pg_stat_bgwriter": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_bgwriter;",
+    #"pg_index": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_index;",
+    #"pg_attribute": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_attribute;",
+    #"pg_stat_user_tables": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_user_tables;",
+    #"pg_trigger": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_trigger t, pg_constraint c WHERE t.tgconstraint = c.oid;",
 }
 
 
@@ -247,10 +249,10 @@ def main(benchmark, outdir, collector_interval, pid, bpf_trace):
 
     # Augment with pgstattuple_approx data.
     tables = BENCHDB_TO_TABLES[benchmark]
-    for tbl in tables:
-        PG_COLLECTOR_TARGETS[tbl] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstattuple('{tbl}');"
-    for idx in BENCHDB_TO_INDEX[benchmark]:
-        PG_COLLECTOR_TARGETS[idx] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstatindex('{idx}');"
+    #for tbl in tables:
+    #    PG_COLLECTOR_TARGETS[tbl] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstattuple('{tbl}');"
+    #for idx in BENCHDB_TO_INDEX[benchmark]:
+    #    PG_COLLECTOR_TARGETS[idx] = f"SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pgstatindex('{idx}');"
 
     # Monitor the postgres PID.
     setproctitle.setproctitle("Main Collector Process")

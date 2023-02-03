@@ -290,7 +290,7 @@ for workload in "${workload_directory}"/*; do
             fi
 
             # Execute the benchmark
-            doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true" --taskset_benchbase="$taskset_benchbase"
+            doit benchbase_run --benchmark="${benchmark}" --config="${benchbase_config_path}" --args="--execute=true" --taskset_benchbase="$taskset_benchbase" 2>&1 | tee "${benchmark_output}/run.log"
 
             if [ "$enable_collector" != 'False' ];
             then
@@ -300,7 +300,7 @@ for workload in "${workload_directory}"/*; do
 
             # Move the relevant stats out to the benchmark output.
             mkdir "${benchmark_output}/stats.${i}"
-            mv ${PGDATA_LOCATION}/pg_stat/*.csv "${benchmark_output}/stats.${i}/"
+            mv ${PGDATA_LOCATION}/pg_stat "${benchmark_output}/stats.${i}"
 
             if [ ! -z "$post_execute" ];
             then

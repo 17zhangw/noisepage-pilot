@@ -34,9 +34,9 @@ datagen:
     # Whether snapshot metadata.
     snapshot_metadata: False
     # Whether we want to taskset postgres. This provides the cpu-list argument.
-    taskset_postgres: null
+    taskset_postgres: "0-9,20-29"
     # Whether we want to taskset benchbase. This provides the cpu-list argument.
-    taskset_benchbase: null
+    taskset_benchbase: "10-19,30-39"
     # Interval of which to poll the benchbase database about catalog information.
     collector_interval: 30
     # Default options that will (default) apply to all runs. Can be overriden.
@@ -59,49 +59,1075 @@ datagen:
         isolation: TRANSACTION_REPEATABLE_READ
 
   configs:
-    # Describes a specific configuration. Inherits from default.
-    - output_name: tpcc_sf0.01
-      scalefactor: 0.01
-      runs:
-        - terminals: 1
-          works.work.rate: unlimited
-          works.work.time: 60
-          isolation: TRANSACTION_REPEATABLE_READ
-    #- output_name: tpcc_sf0.01
-    #  restore_db_path: /tmp/dump.dir
-    #  scalefactor: 0.01
-    #  continuous: true
-    #  runs:
-    #    - terminals: 1
-    #      works.work.rate: unlimited
-    #      works.work.time: 10
-    #      isolation: TRANSACTION_REPEATABLE_READ
-    #      post_execute_sql: "/tmp/fillfactor.sql"
-    #      options:
-    #        - enable_seqscan = off
-    #    - terminals: 1
-    #      works.work.rate: unlimited
-    #      works.work.time: 30
-    #      isolation: TRANSACTION_REPEATABLE_READ
-    #      post_execute_sql: "/tmp/fillfactor.sql"
-    #      options:
-    #        - enable_bitmapscan = off
+      - output_name: "tpcc_sf100_ff100_wal32kb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - wal_buffers = '32KB'
+      - output_name: "tpcc_sf100_ff100_wal1mb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - wal_buffers = '1MB'
+      - output_name: "tpcc_sf100_ff100_wal32mb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - wal_buffers = '32MB'
+      - output_name: "tpcc_sf100_ff100_wal128mb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - wal_buffers = '128MB'
+      - output_name: "tpcc_sf100_ff100_wal512mb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - wal_buffers = '512MB'
 
-    #- output_name: tpcc_sf0.01
-    #  restore_db_path: /tmp/dump.dir
-    #  scalefactor: 0.01
-    #  runs:
-    #    - terminals: 1
-    #      works.work.rate: unlimited
-    #      works.work.time: 30
-    #     isolation: TRANSACTION_REPEATABLE_READ
+      - output_name: "tpcc_sf100_ff100_min80mb_maxwal1gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '80MB'
+              - max_wal_size = '1GB'
+      - output_name: "tpcc_sf100_ff100_min80mb_maxwal2gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '80MB'
+              - max_wal_size = '2GB'
+      - output_name: "tpcc_sf100_ff100_min80mb_maxwal4gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '80MB'
+              - max_wal_size = '4GB'
+      - output_name: "tpcc_sf100_ff100_min80mb_maxwal8gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '80MB'
+              - max_wal_size = '8GB'
 
-    #- output_name: tpcc_sf0.01
-    #  dump_db: True
-    #  post_create_sql: "/tmp/fillfactor.sql"
-    #  scalefactor: 0.01
-    #  runs:
-    #    - terminals: 1
-    #      works.work.rate: unlimited
-    #     works.work.time: 30
-    #      isolation: TRANSACTION_REPEATABLE_READ
+      - output_name: "tpcc_sf100_ff100_min1gb_maxwal1gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '1GB'
+              - max_wal_size = '1GB'
+      - output_name: "tpcc_sf100_ff100_min1gb_maxwal2gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '1GB'
+              - max_wal_size = '2GB'
+      - output_name: "tpcc_sf100_ff100_min1gb_maxwal4gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '1GB'
+              - max_wal_size = '4GB'
+      - output_name: "tpcc_sf100_ff100_min1gb_maxwal8gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '1GB'
+              - max_wal_size = '8GB'
+
+      - output_name: "tpcc_sf100_ff100_min2gb_maxwal2gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '2GB'
+              - max_wal_size = '2GB'
+      - output_name: "tpcc_sf100_ff100_min2gb_maxwal4gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '2GB'
+              - max_wal_size = '4GB'
+      - output_name: "tpcc_sf100_ff100_min2gb_maxwal8gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '2GB'
+              - max_wal_size = '8GB'
+
+      - output_name: "tpcc_sf100_ff100_min4gb_maxwal8gb"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - min_wal_size = '4GB'
+              - max_wal_size = '8GB'
+
+      - output_name: "tpcc_sf100_ff100_rt1000_ckpt30"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 1000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - checkpoint_timeout = 30
+      - output_name: "tpcc_sf100_ff100_rt1000_ckpt120"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 1000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - checkpoint_timeout = 120
+      - output_name: "tpcc_sf100_ff100_rt1000_ckpt300"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 1000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - checkpoint_timeout = 300
+
+      - output_name: "tpcc_sf100_ff100_rt2000_ckpt30"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 2000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - checkpoint_timeout = 30
+      - output_name: "tpcc_sf100_ff100_rt2000_ckpt120"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 2000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - checkpoint_timeout = 120
+      - output_name: "tpcc_sf100_ff100_rt2000_ckpt300"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 2000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - checkpoint_timeout = 300
+
+      - output_name: "tpcc_sf100_ff100_rt2000_ckpt60_bg10"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 2000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - bgwriter_delay = 10
+              - checkpoint_timeout = 60
+      - output_name: "tpcc_sf100_ff100_rt2000_ckpt60_bg50"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 2000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - bgwriter_delay = 50
+              - checkpoint_timeout = 60
+      - output_name: "tpcc_sf100_ff100_rt2000_ckpt60_bg1000"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 2000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - bgwriter_delay = 1000
+              - checkpoint_timeout = 60
+      - output_name: "tpcc_sf100_ff100_rt2000_ckpt60_bg200"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 2000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - bgwriter_delay = 200
+              - checkpoint_timeout = 60
+
+      - output_name: "tpcc_sf100_ff100_rt5000_ckpt60_bg10"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - bgwriter_delay = 10
+              - checkpoint_timeout = 60
+      - output_name: "tpcc_sf100_ff100_rt5000_ckpt60_bg50"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - bgwriter_delay = 50
+              - checkpoint_timeout = 60
+      - output_name: "tpcc_sf100_ff100_rt5000_ckpt60_bg1000"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - bgwriter_delay = 1000
+              - checkpoint_timeout = 60
+      - output_name: "tpcc_sf100_ff100_rt5000_ckpt60_bg200"
+        benchmark: tpcc
+        scalefactor: 100
+        snapshot_data: False
+        enable_collector: True
+        collector_interval: 5
+        continuous: False
+        restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+        runs:
+          - terminals: 20
+            works.work.rate: 5000
+            works.work.time: 1500
+            works.work.warmup: 300
+            isolation: TRANSACTION_REPEATABLE_READ
+            options:
+              - qss_capture_enabled = OFF
+              - plan_cache_mode = 'force_generic_plan'
+              - bgwriter_delay = 200
+              - checkpoint_timeout = 60
+
+      #- output_name: "tpcc_sf100_ff100_sb4gb"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 1000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 4GB
+      #- output_name: "tpcc_sf100_ff100_sb8gb"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 1000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 8GB
+      #- output_name: "tpcc_sf100_ff100_sb16gb"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 1000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 16GB
+      #- output_name: "tpcc_sf100_ff100_sb32gb"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 1000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 32GB
+      #- output_name: "tpcc_sf100_ff100_sb64gb"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 1000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: "tpcc_sf100_ff100_sb4gb_rt5000"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 5000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 4GB
+      #- output_name: "tpcc_sf100_ff100_sb8gb_rt5000"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 5000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 8GB
+      #- output_name: "tpcc_sf100_ff100_sb16gb_rt5000"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 5000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 16GB
+      #- output_name: "tpcc_sf100_ff100_sb32gb_rt5000"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 5000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 32GB
+      #- output_name: "tpcc_sf100_ff100_sb64gb_rt5000"
+      #  benchmark: tpcc
+      #  scalefactor: 100
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/tpcc_sf100_ff100.dir
+      #  runs:
+      #    - terminals: 20
+      #      works.work.rate: 1000
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: "seats_0_0"
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  dump_db: True
+      #  dump_db_path: /home/wz2/pg_dumps/seats_sf20_ff100.dir
+      #  runs:
+      #    - terminals: 1
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_0_1
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff100.dir
+      #  runs:
+      #    - terminals: 1
+      #      pre_execute_sql: /tmp/seats.sql
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_0_2
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff100.dir
+      #  runs:
+      #    - terminals: 1
+      #      pre_execute_sql: /tmp/seats_1.sql
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_0_3
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff100.dir
+      #  runs:
+      #    - terminals: 1
+      #      pre_execute_sql: /tmp/seats_2.sql
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_1_0
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  post_create_sql: "/tmp/seats_1.sql"
+      #  dump_db: True
+      #  dump_db_path: /home/wz2/pg_dumps/seats_sf20_ff50.dir
+      #  runs:
+      #    - terminals: 1
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_2_0
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  post_create_sql: "/tmp/seats.sql"
+      #  dump_db: True
+      #  dump_db_path: /home/wz2/pg_dumps/seats_sf20_ff10.dir
+      #  runs:
+      #    - terminals: 1
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_3_0
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  post_create_sql: "/tmp/seats_2.sql"
+      #  dump_db: True
+      #  dump_db_path: /home/wz2/pg_dumps/seats_sf20_ff75.dir
+      #  runs:
+      #    - terminals: 1
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_0_0_4
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff100.dir
+      #  runs:
+      #    - terminals: 4
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_0_1_4
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff100.dir
+      #  runs:
+      #    - terminals: 4
+      #      pre_execute_sql: /tmp/seats.sql
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_0_2_4
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff100.dir
+      #  runs:
+      #    - terminals: 4
+      #      pre_execute_sql: /tmp/seats_1.sql
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_0_3_4
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff100.dir
+      #  runs:
+      #    - terminals: 4
+      #      pre_execute_sql: /tmp/seats_2.sql
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_1_0_4
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff50.dir
+      #  runs:
+      #    - terminals: 4
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_2_0_4
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff10.dir
+      #  runs:
+      #    - terminals: 4
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+
+      #- output_name: seats_3_0_4
+      #  benchmark: seats
+      #  scalefactor: 20
+      #  snapshot_data: False
+      #  enable_collector: False
+      #  continuous: False
+      #  restore_db_path: /home/wz2/pg_dumps/seats_sf20_ff75.dir
+      #  runs:
+      #    - terminals: 4
+      #      works.work.rate: unlimited
+      #      works.work.time: 1500
+      #      works.work.warmup: 300
+      #      isolation: TRANSACTION_REPEATABLE_READ
+      #      options:
+      #        - qss_capture_nested = OFF
+      #        - qss_capture_exec_stats = OFF
+      #        - qss_capture_enabled = OFF
+      #        - plan_cache_mode = 'force_generic_plan'
+      #        - shared_buffers = 64GB
+

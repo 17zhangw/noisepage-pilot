@@ -8,7 +8,8 @@ from plumbum import local
 
 from dodos import VERBOSITY_DEFAULT, default_artifacts_path, default_build_path
 
-ARTIFACTS_PATH = default_artifacts_path()
+#ARTIFACTS_PATH = default_artifacts_path()
+ARTIFACTS_PATH = Path("/mnt/nvme1n1/noisepage")
 BUILD_PATH = default_build_path()
 DEFAULT_POSTGRESQL_CONF_PATH = Path("config/postgres/default_postgresql.conf").absolute()
 
