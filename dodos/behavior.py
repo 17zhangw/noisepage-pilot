@@ -16,7 +16,8 @@ from dodos.noisepage import (
 )
 from behavior import BENCHDB_TO_TABLES
 
-ARTIFACTS_PATH = default_artifacts_path()
+#ARTIFACTS_PATH = default_artifacts_path()
+ARTIFACTS_PATH = Path("/home/wz2/other_ssd/wz2/behavior")
 BUILD_PATH = default_build_path()
 
 # Input: various configuration files.

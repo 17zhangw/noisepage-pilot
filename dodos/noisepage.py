@@ -8,7 +8,8 @@ from plumbum import local
 
 from dodos import VERBOSITY_DEFAULT, default_artifacts_path, default_build_path
 
-ARTIFACTS_PATH = default_artifacts_path()
+#ARTIFACTS_PATH = default_artifacts_path()
+ARTIFACTS_PATH = Path("/home/wz2/other_ssd/wz2/noisepage")
 BUILD_PATH = default_build_path()
 DEFAULT_POSTGRESQL_CONF_PATH = Path("config/postgres/default_postgresql.conf").absolute()
 
@@ -222,8 +223,8 @@ def task_noisepage_install_extensions():
         "DROP EXTENSION IF EXISTS phantom",
         "DROP EXTENSION IF EXISTS warmer",
         "DROP EXTENSION IF EXISTS pgstattuple",
-        "CREATE EXTENSION qss",
-        "CREATE EXTENSION phantom",
+        #"CREATE EXTENSION qss",
+        #"CREATE EXTENSION phantom",
         "CREATE EXTENSION warmer",
         "CREATE EXTENSION pgstattuple",
     ]

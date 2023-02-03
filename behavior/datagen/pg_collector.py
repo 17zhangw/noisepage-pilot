@@ -46,12 +46,19 @@ def lost_something(num_lost):
 
 # Name of output file/target --> (query, frequent)
 PG_COLLECTOR_TARGETS = {
-    "pg_stats": "SELECT EXTRACT(epoch from NOW())*1000000 as time, s.*, c.data_type FROM pg_stats s JOIN information_schema.columns c ON s.tablename=c.table_name AND s.attname=c.column_name WHERE schemaname = 'public';",
+#    "pg_stats": "SELECT EXTRACT(epoch from NOW())*1000000 as time, s.*, c.data_type FROM pg_stats s JOIN information_schema.columns c ON s.tablename=c.table_name AND s.attname=c.column_name WHERE schemaname = 'public';",
     "pg_class": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public';",
     "pg_index": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_index;",
-    "pg_attribute": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_attribute;",
+#    "pg_attribute": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_attribute;",
+    "pg_stat_database": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_database;",
+    "pg_stat_slru": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_slru;",
+    "pg_stat_bgwriter": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_bgwriter;",
+    "pg_stat_wal": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_wal;",
     "pg_stat_user_tables": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_user_tables;",
-    "pg_trigger": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_trigger t, pg_constraint c WHERE t.tgconstraint = c.oid;",
+    "pg_statio_user_tables": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_statio_user_tables;",
+    "pg_stat_user_indexes": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_stat_user_indexes;",
+    "pg_statio_user_indexes": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_statio_user_indexes;",
+#    "pg_trigger": "SELECT EXTRACT(epoch from NOW())*1000000 as time, * FROM pg_trigger t, pg_constraint c WHERE t.tgconstraint = c.oid;",
 }
 
 
@@ -105,10 +112,10 @@ def pg_collector(benchmark, output_rows, output_columns, slow_time, shutdown):
             collector_pids.append(pid)
 
         # Start the phantom.
-        query = """
-            SELECT phantom_start_worker(ARRAY[{tbls}], {delta})
-        """.format(tbls=",".join([f"'{t}'" for t in BENCHDB_TO_TABLES[benchmark]]), delta=slow_time)
-        connection.execute(query, prepare=False)
+        #query = """
+        #    SELECT phantom_start_worker(ARRAY[{tbls}], {delta})
+        #""".format(tbls=",".join([f"'{t}'" for t in BENCHDB_TO_TABLES[benchmark]]), delta=slow_time)
+        #connection.execute(query, prepare=False)
 
         # Poll on the Collector's output buffer until Collector is shut down.
         while not shutdown.is_set():
@@ -137,10 +144,10 @@ def pg_collector(benchmark, output_rows, output_columns, slow_time, shutdown):
                 logger.warning("Userspace Collector caught %s.", e)
 
         # Make sure that we stall until the phantom worker has shutdown.
-        exist = True
-        connection.execute("SELECT phantom_stop_worker()", prepare=False)
-        while exist:
-            exist = bool([r for r in connection.execute("SELECT phantom_worker_exists()", prepare=False)][0][0])
+        #exist = True
+        #connection.execute("SELECT phantom_stop_worker()", prepare=False)
+        #while exist:
+        #    exist = bool([r for r in connection.execute("SELECT phantom_worker_exists()", prepare=False)][0][0])
 
     logger.info("Userspace Collector shut down.")
 

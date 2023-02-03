@@ -107,6 +107,7 @@ def task_collector_shutdown():
     """
 
     def shutdown_collector(output_dir):
+        time.sleep(60)
         sudo["pkill", "-SIGINT", "-i", "-f", "Main Collector"](retcode=None)
         while len(list(local.pgrep("behavior collector"))) != 0:
             print("Waiting for collector to shutdown from SIGINT.")

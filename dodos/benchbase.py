@@ -301,3 +301,57 @@ def task_benchbase_warm_benchmark():
             },
         ],
     }
+
+
+def task_benchbase_prewarm_install():
+    """
+    BenchBase: install pg_prewarm for BenchBase benchmarks.
+    """
+    sql_list = ["CREATE EXTENSION IF NOT EXISTS pg_prewarm"]
+
+    return {
+        "actions": [
+            *[f'{dodos.noisepage.ARTIFACT_psql} --dbname={DEFAULT_DB} --command="{sql}"' for sql in sql_list],
+        ],
+        "file_dep": [
+            dodos.noisepage.ARTIFACT_psql,
+        ],
+        "verbosity": VERBOSITY_DEFAULT,
+        "uptodate": [False],
+    }
+
+
+def task_benchbase_pg_prewarm_benchmark():
+    """
+    Behavior modeling: Run warmer_prewarm() on all the tables in the given benchmark.
+    This warms the buffer pool and OS page cache.
+
+    Parameters
+    ----------
+    benchmark : str
+        The benchmark whose tables should be prewarmed.
+    """
+
+    def pg_prewarm(benchmark):
+        if benchmark is None or benchmark not in BENCHDB_TO_TABLES:
+            print(f"Benchmark {benchmark} is not specified or does not exist.")
+            return False
+
+        for table in BENCHDB_TO_TABLES[benchmark]:
+            query = f"SELECT * FROM pg_prewarm('{table}');"
+            local[str(ARTIFACT_psql)]["--dbname=benchbase"]["--command"][query]()
+
+    return {
+        "actions": [pg_prewarm],
+        "file_dep": [ARTIFACT_psql],
+        "uptodate": [False],
+        "verbosity": VERBOSITY_DEFAULT,
+        "params": [
+            {
+                "name": "benchmark",
+                "long": "benchmark",
+                "help": "Benchmark whose tables should be analyzed.",
+                "default": None,
+            },
+        ],
+    }
