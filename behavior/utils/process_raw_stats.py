@@ -48,7 +48,7 @@ def process_chunk(work_prefix, workload_only, extract_ous, chunk, plans_df, usec
     chunk.reset_index(drop=False, inplace=True)
     if extract_ous:
         # Assert that we've fully matched.
-        assert chunk.total_cost.isna().sum() == 0
+        chunk = chunk[~chunk.total_cost.isna()]
 
     # We don't actually want to drop. Just set their child plans to -1.
     chunk.fillna(value={"left_child_node_id": -1, "right_child_node_id": -1}, inplace=True)

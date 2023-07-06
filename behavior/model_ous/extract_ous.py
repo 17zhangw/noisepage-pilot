@@ -247,11 +247,11 @@ def extract_ous(connection, work_prefix, plans_df, output_dir):
             queries = []
 
             derived_map = {}
-            for k, v in EXECUTION_FEATURES_MAP.items():
-                if k.startswith(ou.name):
-                    derived_map[v] = k
+            #for k, v in EXECUTION_FEATURES_MAP.items():
+            #    if k.startswith(ou.name):
+            #        derived_map[v] = k
 
-            query = "SELECT " + ",".join([tup[0] for tup in QSS_STATS_COLUMNS if not tup[0].startswith("counter")])
+            query = "SELECT " + ",".join([tup[0] for tup in QSS_STATS_COLUMNS if not tup[0].startswith("counter") and not tup[0].startswith("blk_")])
             # Get all the derived execution features from renaming counters.
             if len(derived_map) > 0:
                 query += "," + ",".join([f"{k} as \"{v}\"" for k, v in derived_map.items()])
@@ -270,7 +270,7 @@ def extract_ous(connection, work_prefix, plans_df, output_dir):
                         "plan_node_id",
                         "left_child_node_id", 
                         "right_child_node_id",
-                    ]])
+                    ] and ("target_oid" in f or "indexid" in f or "_" not in f)])
 
             if len(all_features) > 0:
                 query = "SELECT " + ",".join([f for f in CREATE_PLAN_COLUMNS if f != "features"])
@@ -279,15 +279,15 @@ def extract_ous(connection, work_prefix, plans_df, output_dir):
                 query += f" FROM {work_prefix}_md_plans plan WHERE plan.features->>'node_type' = '{ou.name}'"
                 queries.append((query, f"{ou.name}_plan.csv"))
 
-            if ou in [OperatingUnit.IndexScan, OperatingUnit.IndexOnlyScan, OperatingUnit.ModifyTableIndexInsert]:
-                query = f"SELECT * FROM {work_prefix}_md_pg_settings"
-                queries.append((query, f"{ou.name}_settings.csv"))
+            #if ou in [OperatingUnit.IndexScan, OperatingUnit.IndexOnlyScan, OperatingUnit.ModifyTableIndexInsert]:
+            ##    query = f"SELECT * FROM {work_prefix}_md_pg_settings"
+            ##    queries.append((query, f"{ou.name}_settings.csv"))
 
-                query = f"SELECT * FROM {work_prefix}_md_idx_view"
-                queries.append((query, f"{ou.name}_idx.csv"))
-            elif ou == OperatingUnit.ModifyTableInsert or ou == OperatingUnit.ModifyTableUpdate:
-                query = f"SELECT * FROM {work_prefix}_md_pg_class_tables "
-                queries.append((query, f"{ou.name}_tbls.csv"))
+            #    query = f"SELECT * FROM {work_prefix}_md_idx_view"
+            #    queries.append((query, f"{ou.name}_idx.csv"))
+            #elif ou == OperatingUnit.ModifyTableInsert or ou == OperatingUnit.ModifyTableUpdate:
+            #    query = f"SELECT * FROM {work_prefix}_md_pg_class_tables "
+            #    queries.append((query, f"{ou.name}_tbls.csv"))
 
             ou_path = output_dir / ou.name
             ou_path.mkdir(parents=True, exist_ok=True)
@@ -385,6 +385,7 @@ class ExtractOUsCLI(cli.Application):
         # By default, difference all the valid experiments.
         pattern = "*" if self.glob_pattern is None else self.glob_pattern
         experiments = sorted(path.name for path in self.dir_data.glob(pattern))
+        print(self.dir_data)
         assert len(experiments) > 0, "No training data found?"
 
         for experiment in experiments:

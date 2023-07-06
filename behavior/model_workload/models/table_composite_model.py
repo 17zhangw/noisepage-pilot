@@ -23,7 +23,10 @@ from behavior.model_workload.models import MAX_KEYS
 from behavior.model_workload.utils import OpType, Map
 from sklearn.preprocessing import MinMaxScaler
 
-from autogluon.tabular import TabularDataset, TabularPredictor
+try:
+    from autogluon.tabular import TabularDataset, TabularPredictor
+except:
+    pass
 from behavior.model_workload.models.multilabel_predictor import MultilabelPredictor
 from behavior.model_workload.models.utils import generate_dataset_table, generate_inference_table
 

@@ -26,6 +26,7 @@ TRAILING_BLOCKED_FEATURES = [
     "relname",
     "relkind",
     "generation",
+    "target_oid",
 ]
 
 
@@ -202,7 +203,86 @@ def clean_input_data(df, separate_indkey_features, is_train):
     df.sort_index(axis=1, inplace=True)
 
     # Shift the target columns to the end.
-    df = df[[c for c in df if c not in TARGET_COLUMNS] + [t for t in TARGET_COLUMNS if t in df]]
+    df = df[[c for c in df if c not in TARGET_COLUMNS] + [t for t in TARGET_COLUMNS if t in df]].copy()
+
+    if "Strategy" in df:
+        df["Strategy"] = df["Strategy"].apply(lambda c: {
+            "Plain": 0,
+            "Sorted": 1,
+            "Hashed": 2,
+            "Mixed": 3,
+            "???": 4}[c])
+
+    if "Partial Mode" in df:
+        df["Partial Mode"] = df["Partial Mode"].apply(lambda c: {
+            "Partial": 0,
+            "Finalize": 1,
+            "Simple": 2}[c])
+
+    if "Scan Direction" in df:
+        df["Scan Direction"] = df["Scan Direction"].apply(lambda c: {
+            "Backward": 0,
+            "NoMovement": 1,
+            "Forward": 2}[c])
+
+    if "Join Type" in df:
+        df["Join Type"] = df["Join Type"].apply(lambda c: {
+            "Inner": 0,
+            "Left": 1,
+            "Full": 2,
+            "Right": 3,
+            "Semi": 4}[c])
+
+    columns = [
+        "Alias",
+        "Filter",
+        "Recheck Cond",
+        "Relation Name",
+        "Schema",
+        "Index Cond",
+        "Index Name",
+        "Parent Relationship",
+        "Function Call",
+        "Function Name",
+
+        "Sort Method",
+        "Sort Space Type",
+
+        "indimmediate",
+        "indisexclusion",
+        "indisprimary",
+        "indisunique",
+
+        "Cache Key",
+        "Operation",
+
+        "Actual Rows",
+        "Actual Loops",
+        "Rows Removed by Filter",
+        "Rows Removed by Join Filter",
+
+        "Planned Partitions",
+        "Cache Evictions",
+        "Cache Hits",
+        "Cache Misses",
+        "Cache Overflows",
+        "Peak Memory Usage",
+
+        "HashAgg Batches",
+        "Disk Usage",
+        "Sort Space Used",
+        "Join Filter",
+        "Heap Fetches",
+        "Hash Batches",
+        "Hash Buckets",
+        "Original Hash Batches",
+        "Original Hash Buckets",
+
+        "Exact Heap Blocks",
+        "Lossy Heap Blocks",
+        "Rows Removed by Index Recheck",
+    ]
+    df.drop(columns=columns, inplace=True, errors='ignore')
     return df
 
 
@@ -323,6 +403,8 @@ class OUDataLoader():
         data = None
         while (data is None or data.shape[0] == 0) and len(self.ou_files) > 0:
             current_file = self.ou_files[0]
+            import logging
+            logging.info("%s", current_file)
             self._load_metadata(current_file)
 
             if self.chunksize is None:

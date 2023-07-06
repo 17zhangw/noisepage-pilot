@@ -99,9 +99,9 @@ BENCHDB_TO_INDEX = {
         "customer_pkey",
         "stock_pkey",
         "order_line_pkey",
-        "idx_customer_name",
-        "idx_order",
-        "oorder_o_w_id_o_d_id_o_c_id_o_id_key",
+        #"idx_customer_name",
+        #"idx_order",
+        #"oorder_o_w_id_o_d_id_o_c_id_o_id_key",
     ],
 }
 
@@ -279,16 +279,17 @@ EXECUTION_FEATURES_MAP = {
 This describes the map of derived input features to the models.
 It is assumed that the key maps directly to the value.
 """
-DERIVED_FEATURES_MAP = {k: k for k in EXECUTION_FEATURES_MAP}
+#DERIVED_FEATURES_MAP = {k: k for k in EXECUTION_FEATURES_MAP}
+DERIVED_FEATURES_MAP = {}
 DERIVED_FEATURES_MAP.update({"total_cost": "total_cost", "startup_cost": "startup_cost"})
-DERIVED_FEATURES_MAP.update({"IndexScan_scan_est_pages_needed": "IndexScan_scan_est_pages_needed"})
-DERIVED_FEATURES_MAP.update({"IndexOnlyScan_scan_est_pages_needed": "IndexOnlyScan_scan_est_pages_needed"})
-DERIVED_FEATURES_MAP.update({"SeqScan_scan_est_pages_needed": "SeqScan_scan_est_pages_needed"})
-
-for ou in OperatingUnit:
-    # Generate per-OU switches for the KNOBs and the block stats.
-    feats = ["blk_hit", "blk_miss", "blk_dirty", "blk_write"] + list(KNOBS.keys())
-    DERIVED_FEATURES_MAP.update({ou.name + "_" + feat: feat for feat in feats})
-
-    feats = ["total_cost", "startup_cost"]
-    DERIVED_FEATURES_MAP.update({feat + "_" + ou.name: feat for feat in feats})
+#DERIVED_FEATURES_MAP.update({"IndexScan_scan_est_pages_needed": "IndexScan_scan_est_pages_needed"})
+#DERIVED_FEATURES_MAP.update({"IndexOnlyScan_scan_est_pages_needed": "IndexOnlyScan_scan_est_pages_needed"})
+#DERIVED_FEATURES_MAP.update({"SeqScan_scan_est_pages_needed": "SeqScan_scan_est_pages_needed"})
+#
+#for ou in OperatingUnit:
+#    # Generate per-OU switches for the KNOBs and the block stats.
+#    feats = ["blk_hit", "blk_miss", "blk_dirty", "blk_write"] + list(KNOBS.keys())
+#    DERIVED_FEATURES_MAP.update({ou.name + "_" + feat: feat for feat in feats})
+#
+#    feats = ["total_cost", "startup_cost"]
+#    DERIVED_FEATURES_MAP.update({feat + "_" + ou.name: feat for feat in feats})

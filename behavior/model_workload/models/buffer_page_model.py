@@ -17,7 +17,10 @@ from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 import shutil
 
-from autogluon.tabular import TabularDataset, TabularPredictor
+try:
+    from autogluon.tabular import TabularDataset, TabularPredictor
+except:
+    pass
 from behavior.model_workload.models.multilabel_predictor import MultilabelPredictor
 from behavior.model_workload.models.utils import identify_key_size
 

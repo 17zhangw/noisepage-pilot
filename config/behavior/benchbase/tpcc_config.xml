@@ -7,19 +7,19 @@
     <url>jdbc:postgresql://localhost:5432/benchbase?preferQueryMode=extended</url>
     <username>admin</username>
     <password>password</password>
-    <isolation>TRANSACTION_READ_COMMITTED</isolation>
+    <isolation>TRANSACTION_REPEATABLE_READ</isolation>
     <batchsize>128</batchsize>
 
     <!-- Scale factor is the number of warehouses in TPCC -->
-    <scalefactor>1</scalefactor>
+    <scalefactor>10</scalefactor>
 
     <!-- The workload -->
-    <terminals>1</terminals>
+    <terminals>20</terminals>
     <works>
         <work>
-            <time>60</time>
+            <time>300</time>
             <warmup>0</warmup>
-            <rate>10000</rate>
+            <rate>unlimited</rate>
             <weights>45,43,4,4,4</weights>
         </work>
     </works>

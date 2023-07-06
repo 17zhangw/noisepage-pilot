@@ -11,7 +11,7 @@ datagen:
     # This is the benchmark that should be executed.
     benchmark: tpcc
     # scale factor at which to load the database and execute it at.
-    scalefactor: 1
+    scalefactor: 10
     # Path to a saved database that should be restored with pg_restore. If this is specified, then the
     # benchbase data loader will not run.
     restore_db_path: null
@@ -60,13 +60,46 @@ datagen:
 
   configs:
     # Describes a specific configuration. Inherits from default.
-    - output_name: tpcc_sf0.01
-      scalefactor: 0.01
+    - output_name: tpcc_sf10
+      scalefactor: 10
       runs:
         - terminals: 1
           works.work.rate: unlimited
-          works.work.time: 60
+          works.work.time: 300
           isolation: TRANSACTION_REPEATABLE_READ
+          options:
+            - qss_capture_enabled = ON
+            - qss_capture_nested = ON
+            - qss_capture_exec_stats = ON
+            - qss_output_format = noisepage
+    - output_name: tpcc_sf10_less_idx
+      scalefactor: 10
+      post_create_sql: "/tmp/drop.sql"
+      runs:
+        - terminals: 1
+          works.work.rate: unlimited
+          works.work.time: 300
+          isolation: TRANSACTION_REPEATABLE_READ
+          options:
+            - qss_capture_enabled = ON
+            - qss_capture_nested = ON
+            - qss_capture_exec_stats = ON
+            - qss_output_format = noisepage
+    - output_name: tpcc_sf10_less_idx_no_idxscan
+      scalefactor: 10
+      post_create_sql: "/tmp/drop.sql"
+      runs:
+        - terminals: 1
+          works.work.rate: unlimited
+          works.work.time: 300
+          isolation: TRANSACTION_REPEATABLE_READ
+          options:
+            - qss_capture_enabled = ON
+            - qss_capture_nested = ON
+            - qss_capture_exec_stats = ON
+            - qss_output_format = noisepage
+            - enable_indexscan = OFF
+            - enable_indexonlyscan = OFF
     #- output_name: tpcc_sf0.01
     #  restore_db_path: /tmp/dump.dir
     #  scalefactor: 0.01

@@ -98,7 +98,7 @@ def main(
     # Mark this training-evaluation run with a timestamp for identification.
     training_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     train_files = list(dir_data.rglob("*.csv"))
-    train_paths = [fp for fp in train_files if os.stat(fp).st_size > 0]
+    train_files = [fp for fp in train_files if os.stat(fp).st_size > 0 and pd.read_csv(fp, chunksize=4).get_chunk().shape[0] > 0]
     assert len(train_files) > 0, "No matching data files for training could be found."
 
     # Load the data and name the model.
@@ -120,8 +120,9 @@ def main(
             continue
 
         # By default start with all non-plan features disabled.
-        ignore_cols = [ "data_identifier" ]
-        ignore_cols.extend([f for f in df_train.columns if not f.startswith(ou_name + "_")])
+        ignore_cols = [ "Node Type", "incomplete", "data_identifier", "identifier" ]
+        ignore_cols.extend([f for f in df_train.columns if "indexid" in f])
+        #ignore_cols.extend([f for f in df_train.columns if not f.startswith(ou_name + "_")])
 
         # Incrementally re-enable them.
         relevant_features = {k: v for k, v in DERIVED_FEATURES_MAP.items() if k.startswith(ou_name + "_") or k.endswith("_" + ou_name)}

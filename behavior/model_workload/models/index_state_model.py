@@ -24,7 +24,10 @@ from behavior.model_workload.utils import OpType, Map
 from sklearn.preprocessing import MinMaxScaler
 from behavior.utils.process_pg_state_csvs import postgres_julian_to_unix
 
-from autogluon.tabular import TabularDataset, TabularPredictor
+try:
+    from autogluon.tabular import TabularDataset, TabularPredictor
+except:
+    pass
 from behavior.model_workload.models.multilabel_predictor import MultilabelPredictor
 from behavior.model_workload.models.utils import generate_dataset_index
 
